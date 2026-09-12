@@ -301,33 +301,70 @@
     logEl.appendChild(s);
   }
 
+  /* 行的结构：
+        .row            —— 负责"靠哪边"（我方靠右，对方靠左）
+        .row > .col     —— 竖排容器：气泡/文字在上，图标排在下
+        .col > .body    —— 气泡（我方）或纯文字（对方）
+        .col > .acts    —— 复制 / 重新生成 / 删除 那一排小图标
+     .acts 必须是 .col 的子元素而不是 .row 的：.row 是横排 flex，
+     把图标当兄弟节点会变成"再开一列"，在窄屏上会被挤成几十像素宽（踩过）。 */
   function makeRow(kind) {
     var row = document.createElement('div');
     row.className = 'row' + (kind === 'me' ? ' me' : kind === 'sys' ? ' sys' : '');
+    var col = document.createElement('div');
+    col.className = 'col';
     var body = document.createElement('div');
     body.className = 'body ' + (kind === 'me' ? 'bubble' : 'reply');
-    row.appendChild(body);
-    return { row: row, body: body };
+    col.appendChild(body);
+    row.appendChild(col);
+    return { row: row, body: body, col: col };
   }
 
   /* ---------- 每条消息下面的小菜单（复制 / 重新生成 / 删除） ----------
      放在气泡**下面**而不是悬浮在气泡上：
      悬浮按钮在手机上要么挡字，要么得长按才出来，两个都不好用。
      常驻的一行小字更直接 —— 每个都在屏幕上是"能看见就能点"的东西。 */
+  /* 图标用内联 SVG（1.7px 描边、24 视框，和顶栏那套一致）。
+     用文字按钮的问题是：中文两个字比图标宽一倍多，三个并排就把整行撑得比气泡还长，
+     视觉上"挂在气泡右边"—— 用户明确说不要那样。 */
+  function actIcon(name) {
+    var d = {
+      copy: '<rect x="9" y="9" width="12" height="12" rx="2.4"></rect>'
+          + '<path d="M6 15H5.5A1.5 1.5 0 0 1 4 13.5v-8A1.5 1.5 0 0 1 5.5 4h8A1.5 1.5 0 0 1 15 5.5V6"></path>',
+      regen: '<path d="M20 11a8 8 0 1 0-2.3 5.7"></path><path d="M20 4.5V11h-6.2"></path>',
+      del: '<path d="M4 7h16"></path><path d="M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7"></path>'
+          + '<path d="M6.4 7l.8 12.1A1.5 1.5 0 0 0 8.7 20.5h6.6a1.5 1.5 0 0 0 1.5-1.4L17.6 7"></path>'
+          + '<path d="M10.5 11v6"></path><path d="M13.5 11v6"></path>',
+    };
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.7');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.innerHTML = d[name] || '';
+    return svg;
+  }
+
+  var ACT_LABEL = { copy: '复制', regen: '重新生成', del: '删除' };
+
   function actionMenu(kind, msgIndex) {
     var bar = document.createElement('div');
     bar.className = 'acts';
-    var defs = [{ act: 'copy', label: '复制' }];
-    if (kind !== 'me') defs.push({ act: 'regen', label: '重新生成' });
-    defs.push({ act: 'del', label: '删除', danger: true });
+    var acts = ['copy'];
+    if (kind !== 'me') acts.push('regen');     // 我方消息没有"重新生成"
+    acts.push('del');
 
-    defs.forEach(function (d) {
+    acts.forEach(function (a) {
       var b = document.createElement('button');
       b.type = 'button';
-      b.className = 'act' + (d.danger ? ' danger' : '');
-      b.setAttribute('data-act', d.act);
-      b.textContent = d.label;
-      b.setAttribute('aria-label', d.label + '这条消息');
+      b.className = 'act' + (a === 'del' ? ' danger' : '');
+      b.setAttribute('data-act', a);
+      b.setAttribute('aria-label', ACT_LABEL[a] + '这条消息');
+      b.title = ACT_LABEL[a];
+      b.appendChild(actIcon(a));
       bar.appendChild(b);
     });
     bar._msgIndex = msgIndex;
@@ -356,7 +393,7 @@
     if (!body || !body.parentNode) return;
     // 幂等：重新渲染（切会话、归档、重新生成）会走同一条路径，
     // 不给判断的话菜单会叠成两层 —— 看起来像"删一次少两行"
-    var existing = body.parentNode.querySelector(':scope > .acts');
+    var existing = body.parentNode.querySelector(':scope > .acts');   // .col > .acts
     if (existing) { body._acts = existing; return; }
     var idx = body._msgIndex;
     if (idx === undefined || idx < 0) return;
@@ -405,7 +442,10 @@
     if (!m) return;
     copyText(m.content).then(function (ok) {
       toast(ok ? '已复制' : '这台设备不允许自动复制，长按文字手动选吧');
-      if (ok) { btn.textContent = '已复制'; setTimeout(function () { btn.textContent = '复制'; }, 1200); }
+      if (ok) {
+        btn.classList.add('done');
+        setTimeout(function () { btn.classList.remove('done'); }, 900);
+      }
     });
   }
   function doDelete(idx) {

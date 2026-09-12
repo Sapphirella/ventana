@@ -12,7 +12,7 @@
 - **在哪**：`人机恋/ventana/`，三个文件：`index.html`（结构）+ `styles.css`（样式）+ `app.js`（逻辑）。
 - **叫什么**：Ventana（2026-09-12 从 Chambre 改名）。git 历史里的提交信息还写着 `chambre`，那是历史，别改。
 - **怎么跑**：`python3 ventana/serve.py`（不缓存、打印手机访问地址），或双击 `Ventana启动.command`。
-- **怎么测**：起无头 Chrome（**必须 `--no-sandbox`**，另加三个 `--disable-*-background*`）后 `node ventana/tests/mobile.mjs`，186 项。
+- **怎么测**：起无头 Chrome（**必须 `--no-sandbox`**，另加三个 `--disable-*-background*`）后 `node ventana/tests/mobile.mjs`，205 项。
 - **当前状态**：对话 + 人格 + 资料库（按需读文档）+ 记忆馆 + 会话归档都能用；配色是黑白试验版；**多角色已确定不做**。
 - **最要紧的规矩**：改完代码**同步改 `README.md` 和这份文档**，然后 git 提交。
 
@@ -64,8 +64,8 @@ git 历史里还留着 v1 的全部代码（`git show 93ff9c4:ventana/css/chat.c
 | **资料库 docs** | `loadDocs/addDoc/findDoc/docIndexText` | 只存本地；`docIndexText` 才是进提示词的那份索引 |
 | **记忆馆 memories** | `loadMemories/addMemory/memoryIndexText` | AI 写、用户删；索引进提示词，正文按需取 |
 | 配置与人格 | `loadCfg/loadPersona/buildMessages` | ★ `buildMessages` = 人格 + 文档索引 + 记忆索引 |
-| 消息区渲染 | `addMsg/addSystem/restoreLog/attachActions` | 菜单是 `.acts` 一行，挂在 `.body` 之后 |
-| 消息菜单 | `actionMenu/doCopy/doDelete/doRegen` | 直接改存储，不是只改界面 |
+| 消息区渲染 | `addMsg/makeRow/addSystem/restoreLog/attachActions` | 行结构 `.row > .col > (.body + .acts)`，见第 11.5 节 |
+| 消息菜单 | `actIcon/actionMenu/doCopy/doDelete/doRegen` | 图标是内联 SVG；直接改存储，不是只改界面 |
 | 滚动 / 输入卡 | `syncComposer/scrollFollow` | `--composer-h` 由 JS 实测写入 |
 | 流式渲染 | `paintSoon/appendDelta/finalize` | ★ rAF **加**兜底定时器，见第 9 节 |
 | **流式请求** | `streamChat` | 带 tools；参数是**分片**流进来的，必须按 index 拼 |
@@ -97,7 +97,7 @@ git 历史里还留着 v1 的全部代码（`git show 93ff9c4:ventana/css/chat.c
   它也不打印局域网地址，手机上不好开。
 - `png.mjs`：自己写的 PNG 解码器。**这是本项目的核心测试资产**——
   它让"画出来是什么样"变成可断言的东西。扩展测试时优先用它，别退回读 CSS 声明。
-- `mobile.mjs`：186 项，按主题分组：气泡形态 / 布局与安全区 / 交互流程 / 横向溢出与设置页 /
+- `mobile.mjs`：205 项，按主题分组：气泡形态 / 布局与安全区 / 交互流程 / 横向溢出与设置页 /
   黑白约束 / 品牌与数据迁移 / 系统提示词 / 请求体里的 system 消息 / 版本自愈 /
   演示模式自动兜底 / rAF 失效兜底 / 资料库按需读取 / 气泡菜单 / 会话归档 / 记忆馆。
   组内断言的具体判据都写在文件注释里。
@@ -177,6 +177,7 @@ git 历史里还留着 v1 的全部代码（`git show 93ff9c4:ventana/css/chat.c
 | `fix(ventana): Service Worker 旧缓存自愈 + VERSION 升到 v0.4` | 缓存命中时 SW 发 `stale-page` 通知、页面收到自动刷一次（每次加载只刷一次，防循环）；`sw.js` 加 `stale-page-selftest` 钩子让这条真实通道可测（页面自己 dispatchEvent 打不到 SW 监听器）；改 sw.js 必须升 VERSION，否则浏览器 24h 内不会重取；测试 122 项 |
 | `feat(ventana): 演示模式改成自动兜底（去掉模式滑块）+ 系统提示词独立成块` | 删掉「连接方式」滑块与 `cfg.demo` 字段，改为按三项是否填完判定；加状态横幅与「清除连接」；两块之间加间距与分隔线；顺手修掉无头环境 rAF 不触发导致"字不显示"的问题（`paintSoon` 兜底）；测试 122 项 |
 | `refactor(ventana): 单文件拆成 index.html + styles.css + app.js` | 为接下来的四个大功能腾出可读性；SW 预缓存补上新文件（预缓存列表变了必须升 VERSION） |
+| `style(ventana): 消息操作改成气泡下方的小图标排` | 文字按钮 → 内联 SVG 图标；从气泡左缘开始排（不再靠右）；点击区 36×36；修掉 `.acts` 被当成横排第二列挤成 38px 的结构问题；测试 205 项 |
 | `feat(ventana): 资料库 / 气泡菜单 / 会话归档 / 记忆馆 四个功能` | 资料库按需读取（索引进提示词、正文 tools 或 `[[读:]]` 索取）；每条气泡下 复制/重新生成/删除；会话归档（打标记 + 导出 txt + 取消归档）；记忆馆由 AI 读写摘要；修掉 showTyping 不显示、记忆不重排、归档删除不刷新、重新生成留空壳四个 bug；测试 186 项 |
 
 ---
@@ -374,6 +375,49 @@ Ventana.setContextProvider({
    Node 作用域的函数它看不到，直接用会 ReferenceError（然后请求静默失败）。
 3. **假回答是毫秒级完成的**，所以"点完立刻断言 busy"必然会翻车。
    要断言的是可观察的结果（请求发出、角色序列、消息条数），不是瞬时状态。
+
+---
+
+## 11.5 气泡图标排的位置（2026-09-12 改，作者明确要求过）
+
+作者的原话：「做成小型图标放在我说话的【气泡】和 AI 说完的【那段话】的【下面】！
+**不要摆在右边**！」
+
+改之前是文字按钮（复制 / 重新生成 / 删除），而且整排靠右。两个问题：
+中文两个字比图标宽一倍多，三个并排把整行撑得比气泡还长，看起来就"挂在右边"。
+
+现在的规则（**别再改回右边**）：
+
+| 项 | 值 |
+|---|---|
+| 形态 | 内联 SVG，1.7px 描边、16px 见方（和顶栏那套图标同源） |
+| 位置 | 气泡/文字**下方**，从**左缘**开始排（实测偏差 0px） |
+| 点击区 | 36×36（图标本体 16px，靠 `padding: 0 10px` 调和） |
+| 对方那条 | 复制 / 重新生成 / 删除 |
+| 我方那条 | 复制 / 删除（没有"重新生成我"这种需求） |
+
+### 改这个位置时踩的两个结构坑
+
+1. **`.acts` 不能做 `.row` 的直接子元素。** `.row` 是横排 flex，
+   图标排会被当成"再开一列"，在 390px 屏上被挤成 **38px 宽**（三个图标叠在一起看不见）。
+   → 现在结构是 `.row > .col > (.body + .acts)`，`.col` 竖排。
+2. **`.row.me .col` 不能设 `align-items: flex-end`。** 那样图标排的 `margin-left: -10px`
+   会被对齐计算吃掉，图标偏出气泡左缘 10px。→ 只让 `.body` 自己 `align-self: flex-end`，
+   `.col` 用 `align-items: stretch` 让 `.acts` 的 `width:100%` 等于气泡宽度。
+
+### 为什么用 `margin-left: -10px` 而不是给 `.col` 留内边距
+
+为了让**图标本体**的左缘与气泡左缘齐平，整排要往左收 10px（等于按钮的左内边距）。
+收出去的这 10px 会让点击区比 `.col` 宽，所以窄屏可能溢出 —— 因此
+`mobile.mjs` 的「横向溢出」一组**在 320 / 390 / 900 三个宽度下**都断言了
+"图标排都在视口内"和"图标都对齐气泡左缘"。
+
+### 测试里两个假阳性（已修，别再写回去）
+
+- 量"菜单在内容下方"时不能拿 `.body` 的 `top` 比：菜单挂了负外边距，空气泡那种高度
+  里它会算成"在上面"。要拿**气泡/文字自己的 bottom** 比。
+- 像素采样"对方回复没有底色"时，采样点不能太靠下 —— 会打到图标（图标是 `--text-2` 灰，
+  同样"非背景"），误报过一次 145 的差异。要在**最后一行文字**那一带取样。
 
 ---
 

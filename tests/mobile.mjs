@@ -173,15 +173,17 @@ for (const scheme of ['light', 'dark']) {
       `${label}：像素采样确认我方气泡左上角被切圆（角落=底色:${cornerIsBg} 中心≠底色:${centerNotBg} 差值 ${d}）`);
     info(`气泡底色 RGB(${inside})，左上角 RGB(${corner})`);
   }
-  /* 采样点必须避开笔画：回复短的时候，区域中心正好落在文字上，
-     文字颜色接近反色，差异自然很大 —— 那是假阳性（踩过一次）。
-     所以先量出这行里文字真正覆盖到的右边界，再在它右边采样：
-     那里不可能有文字，如果还出现"非背景"的颜色，才说明有底色。 */
+  /* 采样点必须避开**笔画**和**图标**，否则是假阳性：
+       · 回复短的时候，正文中心正好压在字上（文字接近反色，差异自然大）
+       · 图标挂在这一行正下方，采样点太靠下会打到图标（图标是 text-2 灰，也很"非背景"）
+     所以改成在**正文最后一行文字**的正中取样，只往右偏一点点，
+     并夹在正文右缘之内。 */
   const pageBg = img.px(4 * s, 4 * s);
   for (const r of replies) {
     const textRight = r.rect.x + Math.max(8, Math.round(r.textWidth || r.rect.w));
-    const probeX = Math.min(r.rect.x + r.rect.w - 2, textRight + 6);
-    const probe = img.px(probeX * s, (r.rect.y + r.rect.h / 2) * s);
+    const lastLineY = r.rect.y + Math.max(6, r.rect.h - 10);   // 最后一行（避开图标那一段）
+    const probeX = Math.min(r.rect.x + r.rect.w - 3, textRight + 2);
+    const probe = img.px(probeX * s, lastLineY * s);
     const d = Math.max(...[0, 1, 2].map(i => Math.abs(probe[i] - pageBg[i])));
     ok(d < 24, `${label}：像素采样确认对方回复区域没有底色（文字右侧采样，与页面底色差异 ${d}）`);
   }
@@ -355,7 +357,7 @@ ok(after.scrolledToBottom, '恢复后自动滚到底部');
    四、不许横向溢出（移动端最容易翻车的地方）与设置页
    ============================================================ */
 console.log('\n=== 横向溢出与设置页 ===');
-for (const vp of [{ w: 390, h: 844, name: '手机 390' }, { w: 900, h: 700, name: '窄桌面 900' }]) {
+for (const vp of [{ w: 320, h: 700, name: '小屏 320' }, { w: 390, h: 844, name: '手机 390' }, { w: 900, h: 700, name: '窄桌面 900' }]) {
   await setColorScheme(page, 'dark');
   await page.send('Emulation.setDeviceMetricsOverride', {
     width: vp.w, height: vp.h, deviceScaleFactor: 2, mobile: vp.w < 720,
@@ -384,6 +386,26 @@ for (const vp of [{ w: 390, h: 844, name: '手机 390' }, { w: 900, h: 700, name
   ok(overflow.docScrollX <= 1, `${vp.name}：整页没有横向滚动（${overflow.docScrollX}px）`);
   ok(overflow.logScrollX <= 1, `${vp.name}：消息区没有横向溢出（${overflow.logScrollX}px）`);
   ok(overflow.wide.length === 0, `${vp.name}：没有元素越出视口边缘`, overflow.wide.join(' | '));
+
+  /* 图标排往左收了 10px（为了让图标对齐气泡左缘），窄屏下要确认它没顶出视口 */
+  const actsGeo = await evaluate(page, `(() => {
+    const list = [...document.querySelectorAll('#log .acts')];
+    return list.map(a => {
+      const body = a.closest('.row').querySelector('.body');
+      const svg = a.querySelector('svg');
+      return {
+        left: Math.round(a.getBoundingClientRect().left),
+        right: Math.round(a.getBoundingClientRect().right),
+        dx: body && svg ? Math.round(svg.getBoundingClientRect().x - body.getBoundingClientRect().x) : null,
+      };
+    });
+  })()`);
+  const badGeo = actsGeo.filter(g => g.left < -1 || g.right > vp.w + 1);
+  ok(badGeo.length === 0, `${vp.name}：图标排都在视口内`,
+    JSON.stringify(badGeo));
+  const misaligned = actsGeo.filter(g => g.dx !== null && Math.abs(g.dx) > 2);
+  ok(misaligned.length === 0, `${vp.name}：图标都对齐气泡左缘`,
+    JSON.stringify(misaligned));
 
   /* 设置页也要能用 */
   await evaluate(page, "(() => { document.querySelector('#openConfig').click(); return 1; })()");
@@ -1195,11 +1217,38 @@ const menus = await evaluate(page, `(() => {
   return rows.map(r => ({
     kind: r.classList.contains('me') ? 'me' : 'ai',
     buttons: [...r.querySelectorAll('.act')].map(b => b.getAttribute('data-act')),
-    menuBelowBody: (() => {
+    /* 菜单要在**内容**下面。不能拿 .body 的 top 比 —— 菜单挂了负外边距，
+       空气泡那种高度里它会算成"在上面"。拿气泡/文字本身的 bottom 比才对。 */
+    menuBelowContent: (() => {
+      const acts = r.querySelector('.acts');
+      // 我方那条：.body 自己就是气泡（.body.bubble）；用 .body .bubble 会选到
+      // 别的行里去（选择器写错一次，量出来 -45px，看着像菜单跑到上面去了）
+      const body = r.querySelector('.body');
+      const content = (body && body.classList.contains('bubble'))
+        ? body : (r.querySelector('.bubble') || body);
+      if (!acts || !content) return null;
+      return Math.round(acts.getBoundingClientRect().top - content.getBoundingClientRect().bottom);
+    })(),
+    // 图标是不是真的对齐到气泡/文字的左缘（用户要求"放下面、不要摆右边"）
+    firstIconDx: (() => {
       const acts = r.querySelector('.acts');
       const body = r.querySelector('.body');
-      if (!acts || !body) return null;
-      return Math.round(acts.getBoundingClientRect().top - body.getBoundingClientRect().top);
+      const svg = acts && acts.querySelector('svg');
+      if (!body || !svg) return null;
+      return Math.round(svg.getBoundingClientRect().x - body.getBoundingClientRect().x);
+    })(),
+    iconCount: (() => {
+      const acts = r.querySelector('.acts');
+      return acts ? acts.querySelectorAll('svg').length : 0;
+    })(),
+    textButtonCount: (() => {
+      const acts = r.querySelector('.acts');
+      return acts ? [...acts.querySelectorAll('button')]
+        .filter(b => (b.textContent || '').trim().length > 0).length : 0;
+    })(),
+    actsOverflow: (() => {
+      const acts = r.querySelector('.acts');
+      return acts ? Math.round(acts.getBoundingClientRect().right - innerWidth) : null;
     })(),
   }));
 })()`);
@@ -1212,7 +1261,18 @@ ok(meRow && meRow.buttons.indexOf('regen') < 0, '我方气泡没有"重新生成
 ok(aiRow && aiRow.buttons.indexOf('copy') >= 0 && aiRow.buttons.indexOf('del') >= 0
    && aiRow.buttons.indexOf('regen') >= 0,
   `AI 气泡有 复制 / 重新生成 / 删除（${aiRow && aiRow.buttons.join(',')}）`);
-ok(meRow && meRow.menuBelowBody > 0, '菜单栏在气泡**下方**（不是悬浮在气泡上）');
+ok(meRow && meRow.menuBelowContent >= -2,
+  `菜单在气泡**下方**（与气泡底边的距离 ${meRow && meRow.menuBelowContent}px）`);
+ok(meRow && meRow.firstIconDx !== null && Math.abs(meRow.firstIconDx) <= 2,
+  `图标对齐到气泡左缘，不是摆在右边（偏差 ${meRow && meRow.firstIconDx}px）`);
+ok(aiRow && aiRow.firstIconDx !== null && Math.abs(aiRow.firstIconDx) <= 2,
+  `对方那条的图标也对齐到文字左缘（偏差 ${aiRow && aiRow.firstIconDx}px）`);
+ok(meRow && meRow.iconCount === 2 && aiRow && aiRow.iconCount === 3,
+  `是图标不是文字按钮（我方 ${meRow && meRow.iconCount} 个 / 对方 ${aiRow && aiRow.iconCount} 个）`);
+ok(meRow && meRow.textButtonCount === 0 && aiRow && aiRow.textButtonCount === 0,
+  '按钮里没有文字（纯图标）');
+ok((meRow && meRow.actsOverflow <= 0) && (aiRow && aiRow.actsOverflow <= 0),
+  `图标排没有越出屏幕右缘（${meRow && meRow.actsOverflow} / ${aiRow && aiRow.actsOverflow}）`);
 
 /* 点击区域够不够手指点 */
 const tapSize = await evaluate(page, `(() => {

@@ -84,8 +84,17 @@
   .row { width: 100%; max-width: 720px; margin: 0 auto; display: flex; }
   .row.me { justify-content: flex-end; }
   .row.sys { justify-content: center; }
-  .row .body { flex: 1 1 auto; min-width: 0; max-width: 100%; }
-  .row.me .body { flex: 0 1 auto; }
+  /* 竖排容器：气泡/文字 + 下面那排小图标 */
+  .row .col { flex: 1 1 auto; min-width: 0; max-width: 100%; min-height: 0;
+    display: flex; flex-direction: column; align-items: flex-start; }
+  /* 我方整体靠右：**只**让气泡自己 align-self: flex-end，
+     不要把 .col 设成 align-items: flex-end —— 那样图标排的负外边距会被
+     对齐计算吃掉，图标会偏出气泡左缘 10px（实测如此）。 */
+  .row.me .col { flex: 0 1 auto; }
+  .row .body { min-width: 0; max-width: 100%; }
+  /* 我方气泡宽度按内容收缩；对方文字占满 */
+  .row.me .body { flex: 0 1 auto; align-self: flex-end; max-width: 100%; }
+  .row.me .col { align-items: stretch; }   /* 让 .acts 的 width:100% 等于气泡宽度 */
 
   .bubble {
     background: var(--me-bg); border: 1px solid var(--me-line);
@@ -155,22 +164,42 @@
     35% { opacity: 1; transform: translateY(-3px); } }
   .reply.err { color: var(--err); }
 
-  /* ---------- 每条消息下面的一行小菜单 ---------- */
+  /* ---------- 每条消息下面的一行小图标 ----------
+     位置规则（用户明确要求过，别再改回右边）：
+       · 对方那条：图标从文字**左缘**开始排（和那段话左对齐）
+       · 我方那条：图标从气泡**左缘**开始排 —— 不是贴着屏幕右边，
+         也不是气泡右缘。整排比气泡窄，视觉上就"挂在气泡下面"。
+     所以两边都是 flex-start，靠 .row.me 上的内边距把整行推进气泡的范围里。 */
   .acts {
-    display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap;
+    /* width:100% 是关键：我方气泡和 .col 等宽时，图标排要真正从气泡**左缘**开始，
+       不给 100% 的话它会跟着 align-items:flex-end 跑到右边去（用户明确说不要那样）。
+       图标仍然在气泡下方，因为 .col 是竖排。 */
+    width: 100%;
+    display: flex; gap: 0; flex-wrap: wrap; justify-content: flex-start;
+    /* 往左收 10px：让**图标本体**的左缘与气泡/文字的左缘齐平。
+       这会让按钮的点击区比 .col 左出 10px，所以窄屏上要确认没有横向滚动
+       （mobile.mjs 的「横向溢出」一组守着这件事）。 */
+    margin: 0 0 0 -10px;
   }
-  .row.me .acts { justify-content: flex-end; }
   .act {
-    padding: 7px 10px; min-height: 32px;
-    border-radius: 8px; font-size: 12px; line-height: 1;
-    color: var(--text-2); background: transparent;
-    transition: background .15s ease, color .15s ease;
+    /* 图标本体 15px，但按钮做到 36×36 —— 视觉上稀疏，手指上够用。
+       手机端触摸目标小于 36px 基本按不准（这条在 README 的界面约定里）。 */
+    display: flex; align-items: center; justify-content: center;
+    /* 点击区 36×36 是触摸目标的下限；左右各 10px 内边距让**图标本体**正好落在
+       气泡/文字的左缘与中线之间，视觉上和气泡左对齐 */
+    width: 36px; height: 36px; padding: 0 10px;
+    border-radius: 9px; color: var(--text-2); background: transparent;
+    transition: background .15s ease, color .15s ease, opacity .15s ease;
   }
+  .act svg { width: 16px; height: 16px; display: block; flex: none; }
   .act:active { background: var(--bg-2); color: var(--text); }
   .act.danger:active { color: var(--err); }
-  /* 桌面端有悬停，可以更收敛一点；手机上保持常驻可见 */
+  /* 复制成功时短暂给个反馈（原来是改按钮文字，图标按钮没文字可改） */
+  .act.done { color: var(--text); }
+
+  /* 桌面端有悬停，图标可以更收敛；手机上常驻可见（不然没有悬停就找不到） */
   @media (hover: hover) {
-    .act { opacity: .55; }
+    .act { opacity: .5; }
     .row:hover .act, .act:focus-visible { opacity: 1; }
   }
 
