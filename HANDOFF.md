@@ -58,13 +58,14 @@ git 历史里还留着 v1 的全部代码（`git show 93ff9c4:ventana/css/chat.c
 | 顶部栏 / 消息区 / 输入卡 | 布局 CSS | `.row > .body` 是核心结构，见 README「界面约定」 |
 | 配置页 / toast / reduced-motion | 其余 CSS | `@media (prefers-reduced-motion)` 里关掉动画 |
 | `migrateKeys` | 旧 `chambre.*` → 新 `ventana.*` 的一次性搬迁 | **别删**，删了老用户的设置全丢 |
-| `loadCfg/persistCfg` | 配置读写（localStorage） | key: `ventana.cfg` |
+| `loadCfg/persistCfg` | 配置读写（localStorage） | key: `ventana.cfg`；**没有** `demo` 字段，见第 10 节 |
+| `apiConfigured/renderBanner` | 演示模式判定与状态横幅 | 三项齐了才走真实 API |
 | 消息区 JS | `messages` 数组、`addMsg/addStamp/restoreLog` | key: `ventana.msgs`；结构 `{role, content, at}` |
 | `loadPersona/savePersona/buildMessages` | 系统提示词（人格） | key: `ventana.prompt`，结构 `{text, file}` |
 | 设置页 JS | `fillCfgForm/savePrompt/文件上传` | 人格与 API 分开保存，互不阻塞 |
 | 滚动 | `atBottom/scrollFollow/syncToBottomBtn` | 只有本来就在底部才自动跟随 |
 | `syncComposer` | 把输入卡实测高度写进 `--composer-h` | ResizeObserver 驱动 |
-| `appendDelta/finalize` | 流式渲染（rAF 合帧 + 孤尾保护） | `ORPHAN_TAIL` 去掉未配对的 `**` 尾巴 |
+| `paintSoon/appendDelta/finalize` | 流式渲染（合帧 + 孤尾保护） | ★ `paintSoon` 是 rAF **加**兜底定时器，见第 9 节；`ORPHAN_TAIL` 去掉未配对的 `**` 尾巴 |
 | `pushMsg/commitReply` | 落盘 | ★ **每次定稿就写回**，见下文「坑 3」 |
 | `streamChat` | OpenAI 兼容 SSE 客户端 | `fetch` + `ReadableStream` 手动切 `data:` 行 |
 | `demoStream` | 演示模式 | 拆成 4 段，段间 420–940ms 停顿 |
@@ -176,7 +177,8 @@ git 历史里还留着 v1 的全部代码（`git show 93ff9c4:ventana/css/chat.c
 | `docs(chambre): 交接文档里的版本号改为定稿后的提交哈希` | 文档修正 |
 | `chore(chambre): 开发体验收尾 —— 不缓存的 serve.py、版本化 Service Worker、启动器接上` | 新增 `serve.py`；`index.html` 用 `sw.js?v=<VERSION>` 注册并在 `controllerchange` 时自动刷新；启动器改用 serve.py；删掉无引用的 `.brand/.logo` |
 | `refactor(ventana): 改名 Chambre → Ventana` + 同批次的 `feat(ventana): 系统提示词…` | 目录、启动器、manifest、SW 缓存名、文案全部改名；localStorage 加 `chambre.*` → `ventana.*` 迁移；设置页新增「系统提示词 · 决定它是谁」（textarea + 上传 .md/.txt/.json，整段替换）+ 独立的「保存人格」；`buildMessages()` 负责把人格作为 system 消息发出去；测试 92 项（新增迁移、人格、请求体三组） |
-| `fix(ventana): Service Worker 旧缓存自愈 + VERSION 升到 v0.4` | 缓存命中时 SW 发 `stale-page` 通知、页面收到自动刷一次（每次加载只刷一次，防循环）；`sw.js` 加 `stale-page-selftest` 钩子让这条真实通道可测（页面自己 dispatchEvent 打不到 SW 监听器）；改 sw.js 必须升 VERSION，否则浏览器 24h 内不会重取；测试 100 项 |
+| `fix(ventana): Service Worker 旧缓存自愈 + VERSION 升到 v0.4` | 缓存命中时 SW 发 `stale-page` 通知、页面收到自动刷一次（每次加载只刷一次，防循环）；`sw.js` 加 `stale-page-selftest` 钩子让这条真实通道可测（页面自己 dispatchEvent 打不到 SW 监听器）；改 sw.js 必须升 VERSION，否则浏览器 24h 内不会重取；测试 122 项 |
+| `feat(ventana): 演示模式改成自动兜底（去掉模式滑块）+ 系统提示词独立成块` | 删掉「连接方式」滑块与 `cfg.demo` 字段，改为按三项是否填完判定；加状态横幅与「清除连接」；两块之间加间距与分隔线；顺手修掉无头环境 rAF 不触发导致"字不显示"的问题（`paintSoon` 兜底）；测试 122 项 |
 
 ---
 
@@ -259,7 +261,56 @@ Ventana.setContextProvider({
 
 ---
 
-## 9. 需要问作者的事
+## 9. 无头 Chrome 里 rAF 不触发（2026-09-12 发现）
+
+**发现过程**：测试里"流式过程中光标在闪"这条断言时好时坏，追下去发现根因不是断言写错，
+而是**这个无头 Chrome 里 `document.hidden === true`、`requestAnimationFrame` 一次都不触发**。
+
+**后果**：原来的 `appendDelta` 把绘制全压在 rAF 里 → 字都收到了，屏幕上一个字都不出，
+只剩"正在输入"三点一直转。测试里表现为"文本长度 0 但 `_raw` 已经有值"。
+
+**两条对策**：
+
+1. **App 侧（真正的修复）**：`paintSoon()` —— rAF 与 120ms 兜底定时器谁先到谁画，
+   画完取消另一个。`requestAnimationFrame(...)` 外面还包了 `try`：
+   某些环境调用它就抛，抛出去的话 `el._paint` 永远不复位，那条气泡从此不再更新
+   （表现同样是三点一直转）。真机上的对应场景：后台标签页、被遮住的窗口。
+2. **测试环境**：起无头 Chrome 时加
+   `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding
+   --disable-background-timer-throttling`，页面才会被当作可见、正常产帧。
+   README 的启动命令里已经带上。
+
+**顺带记一条**：页面不可见时浏览器还会把定时器节流到 ~1s 一次，所以兜底不是"立刻出字"，
+而是"最终会出字、不会永远空着"。`mobile.mjs` 里的「rAF 失效时的兜底」一组
+是把 `requestAnimationFrame` 打成空函数来测的 —— 比依赖环境状态可靠。
+
+---
+
+## 10. 演示模式是自动兜底，不是开关（2026-09-12 改）
+
+作者反馈：「演示模式是无 API 连接时的默认模式，它不需要主动开启，
+所以不要让它占据一个滑块板块」。另外一个并列的问题是：API 连接和系统提示词两块挨得太紧。
+
+**改法**：
+
+- 删掉「连接方式：演示模式 / 真实 API」这个滑块，以及 `cfg.demo` 这个存储字段。
+- **改为算出来的状态**：`apiConfigured()` = 三项（Base URL / Key / 模型名）是否都非空。
+  齐了走真实 API，缺一项走内置演示回复。这样不会出现"滑块停在演示模式但其实已配好"
+  这种自相矛盾（旧设计真的有这个风险）。
+- 顶上放一条**会变的状态横幅**：演示模式下明说"现在是演示模式、还缺哪几项、
+  填好保存就会自动切过去"；配好了就显示"已连接 · <模型名>"。
+- 加「清除连接」按钮 —— 它是**回到演示模式的唯一入口**，
+  免得用户为了试演示模式去手动删 Key。人格不会被一起清掉。
+- 两块之间：大间距（34px）+ 细分隔线 + 小节标题（「API 连接」/「系统提示词 · 决定它是谁」）。
+
+**回归测试**（`mobile.mjs` 的「演示模式自动兜底」一组，20 项）：
+界面上没有任何模式选择控件、演示模式下发 0 次网络请求、只填两项仍是演示模式、
+三项齐了不点任何开关就走真实 API、清除连接后回到演示模式且人格保留、
+两块之间的间距与分隔线存在。
+
+---
+
+## 11. 需要问作者的事
 
 以下几件事接手时**不要自己拍板**，先问：
 

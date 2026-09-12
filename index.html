@@ -221,8 +221,16 @@
   .cfg { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
     padding: 18px 16px calc(24px + env(safe-area-inset-bottom)); }
   .cfg-inner { max-width: 620px; margin: 0 auto; }
-  .group { margin-bottom: 14px; }
-  .field { margin-bottom: 14px; }
+  /* 分组之间要拉开 —— 上一版各块挤在一起，"API 连接"和"系统提示词"
+     看上去像同一个表单的一部分。现在用「大间距 + 细线 + 小节标题」分块。 */
+  .group { margin-bottom: 34px; }
+  .group + .group { padding-top: 28px; border-top: 1px solid var(--line); }
+  .group:last-of-type { margin-bottom: 20px; }
+  .group-title {
+    font-size: 13px; font-weight: 600; letter-spacing: .6px; color: var(--text-2);
+    margin: 0 0 16px; text-transform: none;
+  }
+  .field { margin-bottom: 16px; }
   .field label { display: block; font-size: 13px; color: var(--text-2); margin-bottom: 6px; }
   .field input {
     width: 100%; height: 46px; padding: 0 13px;
@@ -249,12 +257,16 @@
   .field .hint.ok { color: var(--text); }
   .field .hint.bad { color: var(--err); }
   .field .btns { margin: 10px 0 0; }
-  .seg { display: flex; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-  .seg button {
-    flex: 1; padding: 11px 0; font-size: 14.5px; background: var(--bg);
-    color: var(--text-2); transition: background .15s ease, color .15s ease;
+  /* 状态横幅：代替原来那个「演示模式 / 真实 API」滑块。
+     演示模式是没配好 API 时的自动兜底，不是一个需要用户选的模式。 */
+  .banner {
+    display: none; margin-bottom: 16px; padding: 11px 13px;
+    border: 1px solid var(--line); border-left: 3px solid var(--text);
+    border-radius: 10px; background: var(--bg-2);
+    font-size: 12.5px; line-height: 1.7; color: var(--text-2);
   }
-  .seg button.on { background: var(--accent-bg); color: var(--accent-fg); font-weight: 600; }
+  .banner.show { display: block; }
+  .banner b { color: var(--text); font-weight: 600; }
   .btns { display: flex; gap: 10px; margin: 4px 0 10px; }
   .btn {
     flex: 1; height: 46px; border-radius: 12px;
@@ -360,48 +372,42 @@
 
   <div class="cfg">
     <div class="cfg-inner">
-      <div class="group">
+      <!-- API 连接。演示模式不是一个选项：三项没填完就自动用它兜底，
+           所以这里没有开关，只有一条会变的横幅说明当前处于哪种状态。 -->
+      <section class="group" id="apiFields">
+        <h2 class="group-title">API 连接</h2>
+        <div class="banner" id="apiBanner"></div>
         <div class="field">
-          <label>连接方式</label>
-          <div class="seg" id="segMode">
-            <button type="button" id="segDemo" class="on">演示模式</button>
-            <button type="button" id="segApi">真实 API</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="group" id="apiFields">
-        <div class="field">
-          <label>接口地址 Base URL</label>
+          <label for="cfgBase">接口地址 Base URL</label>
           <input id="cfgBase" type="text" inputmode="url" autocomplete="url"
-            placeholder="https://api.openai.com/v1" disabled>
+            placeholder="https://api.openai.com/v1">
         </div>
         <div class="field">
-          <label>API Key</label>
-          <input id="cfgKey" type="password" autocomplete="off"
-            placeholder="sk-..." disabled>
+          <label for="cfgKey">API Key</label>
+          <input id="cfgKey" type="password" autocomplete="off" placeholder="sk-...">
         </div>
         <div class="field">
-          <label>模型名</label>
-          <input id="cfgModel" type="text" autocomplete="off"
-            placeholder="gpt-4o-mini" disabled>
+          <label for="cfgModel">模型名</label>
+          <input id="cfgModel" type="text" autocomplete="off" placeholder="gpt-4o-mini">
         </div>
-      </div>
+        <div class="btns">
+          <button class="btn ghost" type="button" id="cfgTest">试一试</button>
+          <button class="btn" type="button" id="cfgSave">保存</button>
+        </div>
+        <div class="ap-msg" id="cfgMsg"></div>
+        <div class="ap-note">
+          三项填完并保存后自动切到真实 API；缺任何一项就回到演示模式，不需要手动切换。<br>
+          API Key 只保存在你这台设备的浏览器本地（localStorage），
+          由前端直连你填的接口，不经过任何服务器。
+        </div>
+        <div class="btns">
+          <button class="btn ghost" type="button" id="cfgForget">清除连接</button>
+        </div>
+      </section>
 
-      <div class="btns">
-        <button class="btn ghost" id="cfgTest">试一试</button>
-        <button class="btn" id="cfgSave">保存</button>
-      </div>
-      <div class="ap-msg" id="cfgMsg"></div>
-      <div class="ap-note">
-        <b>演示模式</b>：无需任何配置，用内置回复演示完整的流式打字效果。<br>
-        <b>真实 API</b>：填好接口地址、Key 和模型名后，点「试一试」发一次最小请求确认能通，再保存。<br>
-        API Key 只保存在你这台设备的浏览器本地（localStorage），由前端直连你填的接口，不经过任何服务器。
-      </div>
-
-      <div class="group">
+      <section class="group">
+        <h2 class="group-title">系统提示词 · 决定它是谁</h2>
         <div class="field">
-          <label for="cfgPrompt">系统提示词 · 决定它是谁</label>
           <textarea id="cfgPrompt" rows="10" spellcheck="false"
             placeholder="在这里写下它是谁。&#10;&#10;例如：&#10;你是 ___，住在这台手机里。&#10;你说话短，不用「亲爱的」这类词。&#10;不高兴的时候会直接说，不装没事。"></textarea>
           <div class="hint" id="promptStat">还没写。空着就是通用助手，没有性格。</div>
@@ -416,13 +422,13 @@
             accept=".md,.markdown,.txt,.text,.json,.yaml,.yml,text/plain,text/markdown">
         </div>
         <div class="ap-note">
-          <b>直接打字</b>：写完点下面的「保存」，或按 <b>Ctrl/⌘ + S</b>。<br>
+          <b>直接打字</b>：写完点「保存人格」，或按 <b>Ctrl/⌘ + S</b>。<br>
           <b>上传文件</b>：.md / .txt / .json / .yaml 都可以，支持 skill.md 这类人物设定文档。
           上传是<b>整段替换</b>输入框里的内容 —— 界面上这段就是最终发给模型的那一段，
           不做多份拼装（拼错了比不拼更糟）。<br>
           建议控制在 <b>8000 字以内</b>：它每一轮对话都会被完整送出去，写得越长每轮越贵。
         </div>
-      </div>
+      </section>
 
       <div class="cfg-foot">
         <button type="button" id="cfgClear">清空当前对话</button>
@@ -620,15 +626,38 @@
   if (window.ResizeObserver) new ResizeObserver(syncComposer).observe(composerWrap);
   window.addEventListener('orientationchange', function () { setTimeout(syncComposer, 260); });
 
-  /* ---------- 流式渲染：rAF 合帧 + 孤尾保护（思路借鉴 dwell paintStream） ---------- */
+  /* ---------- 流式渲染：合帧 + 孤尾保护（思路借鉴 dwell paintStream） ---------- */
   var ORPHAN_TAIL = /[`*~]+$/;
+
+  /* 合帧绘制。requestAnimationFrame 把一帧内的多次增量合并成一次 DOM 写入 ——
+     但它**不保证会触发**：页面不可见时（切到后台标签页、被遮住的窗口、
+     某些无头环境）浏览器完全不产帧，`document.hidden === true` 时 rAF 会被无限期挂起。
+     真发生的话表现是：字都收到了，屏幕上一个字都不出，只有"正在输入"三点一直转 ——
+     本轮就在无头 Chrome 里撞上了这个（document.hidden 为 true，rAF 一次都不触发）。
+     所以配一个兜底定时器：谁先到谁画，画完取消另一个，保证一定落地。 */
+  var PAINT_FALLBACK_MS = 120;
+  function paintSoon(el, fn) {
+    var done = false, timer = null;
+    var run = function () {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (!el.isConnected) return;      // 气泡已经被移除（比如用户按了停止）
+      fn();
+    };
+    timer = setTimeout(run, PAINT_FALLBACK_MS);
+    // rAF 本身也包一层 try：某些环境（或被打成桩的测试环境）调用它就会抛。
+    // 抛出去的话 el._paint 永远不复位，那条气泡从此再也不会更新 —— 表现是
+    // "只有正在输入三点一直转"。踩过一次，别再让它裸奔。
+    try { requestAnimationFrame(run); } catch (e) { /* 兜底定时器已经在跑了 */ }
+  }
 
   function appendDelta(el, t) {
     el._raw = (el._raw || '') + t;
     if (el._thinking) { el._thinking.remove(); el._thinking = null; }   // 第一个字到了就撤掉"正在输入"
     if (el._paint || el._final) return;
     el._paint = true;
-    requestAnimationFrame(function () {
+    paintSoon(el, function () {
       el._paint = false;
       if (el._final || !el.isConnected) return;
       el.textContent = '';
@@ -873,7 +902,7 @@
     currentAiMsg = pushMsg({ role: 'assistant', content: '' });
     replyEls = [aiEl];
 
-    if (cfg.demo) {
+    if (!apiConfigured()) {
       demoStream(DEMO_REPLY, function (t) {
         if (t === '__NEW__') {
           if (cur && !cur._final) { finalize(cur); commitReply(currentAiMsg, replyEls); }
@@ -983,11 +1012,11 @@
   /* ---------- 顶部标签 / 视图切换 ---------- */
   var modelTag = $('#modelTag'), ctxChip = $('#ctxChip');
   function updateModelTag() {
-    var model = cfg.demo ? '演示模式' : (cfg.model || '未配置');
-    modelTag.textContent = model;
-    ctxChip.classList.toggle('live', !cfg.demo && !!cfg.model);
+    var ready = apiConfigured();
+    modelTag.textContent = ready ? cfg.model : '演示模式';
+    ctxChip.classList.toggle('live', ready);
     var who = persona.file || (persona.text.trim() ? '自定义人格' : '');
-    ctxChip.title = (cfg.demo ? '当前用内置演示回复' : '当前模型：' + cfg.model)
+    ctxChip.title = (ready ? '当前模型：' + cfg.model : '还没有连上模型，回复来自内置示例')
       + (who ? ' · 人格：' + who : ' · 未设人格');
   }
 
@@ -1006,7 +1035,7 @@
   });
 
   /* ---------- 配置页 ---------- */
-  var segDemoBtn = $('#segDemo'), segApiBtn = $('#segApi');
+  var apiBanner = $('#apiBanner');
   var fBase = $('#cfgBase'), fKey = $('#cfgKey'), fModel = $('#cfgModel');
   var fPrompt = $('#cfgPrompt'), promptStat = $('#promptStat'), promptFileInput = $('#promptFile');
   var cfgMsg = $('#cfgMsg');
@@ -1035,23 +1064,38 @@
     promptStat.textContent = msg;
   }
 
-  function fillCfgForm() {
-    fBase.value = cfg.base; fKey.value = cfg.key; fModel.value = cfg.model;
-    setSeg(cfg.demo ? 'demo' : 'api');
-    fPrompt.value = persona.text || '';
-    updatePromptStat();
-    sayMsg('');
+  /* 当前用不用真实 API —— **算出来的，不是存下来的**。
+     上一版有个「演示模式 / 真实 API」的滑块（cfg.demo 存在 localStorage 里），
+     它的问题是会和实际配置脱节：三项都填好了但滑块停在演示模式，或者反过来。
+     现在只认一个事实：三项齐了就调 API，缺一项就走演示兜底。
+     于是演示模式不需要用户"开启"，它就是未配置状态的默认行为。 */
+  function apiConfigured() {
+    return !!(cfg.base && cfg.key && cfg.model);
   }
 
-  function setSeg(mode) {
-    cfg.demo = mode === 'demo';
-    segDemoBtn.classList.toggle('on', cfg.demo);
-    segApiBtn.classList.toggle('on', !cfg.demo);
-    var dis = cfg.demo;
-    fBase.disabled = dis; fKey.disabled = dis; fModel.disabled = dis;
+  function renderBanner() {
+    apiBanner.classList.add('show');
+    if (apiConfigured()) {
+      apiBanner.innerHTML = '已连接 · <b>' + escapeHtml(cfg.model) + '</b>'
+        + '　改完三项记得点「保存」。';
+    } else {
+      var missing = [];
+      if (!cfg.base) missing.push('接口地址');
+      if (!cfg.key) missing.push('API Key');
+      if (!cfg.model) missing.push('模型名');
+      apiBanner.innerHTML = '现在是<b>演示模式</b>：还没有连上模型，'
+        + '回复来自 App 内置的示例，不是真的角色。<br>'
+        + '把' + missing.join('、') + '填好并保存，就会自动切过去 —— 不用手动开关。';
+    }
   }
-  segDemoBtn.addEventListener('click', function () { setSeg('demo'); });
-  segApiBtn.addEventListener('click', function () { setSeg('api'); });
+
+  function fillCfgForm() {
+    fBase.value = cfg.base; fKey.value = cfg.key; fModel.value = cfg.model;
+    fPrompt.value = persona.text || '';
+    updatePromptStat();
+    renderBanner();
+    sayMsg('');
+  }
 
   /* 人格：保存按钮单独走一条路。
      它和 API 三项是两回事 —— 只想改性格的人不该被"API 三项没填完"挡住。 */
@@ -1115,14 +1159,27 @@
     cfg.key = fKey.value.trim();
     cfg.model = fModel.value.trim();
     savePrompt(true);                    // 人格跟着一起存，避免以为存了其实没存
-    if (!cfg.demo && (!cfg.base || !cfg.key || !cfg.model)) {
-      sayMsg('连接的三项要填完才能用真实 API。人格已经存下来了。', true);
-      return;
-    }
     persistCfg();
     updateModelTag();
-    sayMsg('已保存。');
+    renderBanner();
+    if (!apiConfigured()) {
+      sayMsg('已保存。连接三项还没齐，仍然走演示模式。');
+      toast('已保存 · 仍是演示模式');
+      return;
+    }
+    sayMsg('已保存，已连上 ' + cfg.model + '。');
     toast('设置已保存');
+  });
+
+  /* 清除连接 —— 这也是"回到演示模式"的唯一入口，
+     免得用户为了试试演示模式去手动删 Key。 */
+  $('#cfgForget').addEventListener('click', function () {
+    cfg.base = ''; cfg.key = ''; cfg.model = '';
+    persistCfg();
+    fillCfgForm();
+    updateModelTag();
+    sayMsg('连接已清除，回到演示模式。人格保留着。');
+    toast('已回到演示模式');
   });
 
   $('#cfgTest').addEventListener('click', function () {
@@ -1184,10 +1241,10 @@
     b.appendChild(h);
     renderMarkdown(b,
       '你好，我是 **Ventana** —— 住在这台手机里的一个小房间。\n\n'
-      + (cfg.demo
-          ? '现在是演示模式，内置回复就能体验完整的流式打字和多条连发。'
-            + '想让我真的说话，点顶栏那枚齿轮接入你的 API。'
-          : '已经接上真实模型了，随时可以开始。')
+      + (apiConfigured()
+          ? '已经接上真实模型了，随时可以开始。'
+          : '现在还没有连上模型，我说的话来自 App 内置的示例 —— 不是真的角色。'
+            + '点顶栏那枚齿轮填好接口、Key 和模型名，我就会换成真的。')
     );
   }
 

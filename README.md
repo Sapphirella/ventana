@@ -20,7 +20,7 @@
 | 对话与人格持久化到 localStorage | 导出 / 备份 |
 | 深浅两套主题跟随系统 | 主题手动切换、配色体系 |
 | 可安装 PWA（manifest + service worker 离线可用） | 图标与启动画面精修 |
-| 像素级自动化测试（100 项，见下文） | —— |
+| 像素级自动化测试（122 项，见下文） | —— |
 
 **方向已经调整**：原计划的"多角色 + 角色卡"**不做了**。
 现在只有一个对话对象，它的性格由「连接设置 → 系统提示词」决定。
@@ -64,7 +64,7 @@ ventana/
 └─ tests/
    ├─ cdp.mjs              零依赖 Chrome DevTools Protocol 客户端
    ├─ png.mjs              够用的小 PNG 解码器（读像素用，见下文）
-   ├─ mobile.mjs           移动端验收测试 100 项（像素 + 计算样式 + 交互 + 人格与迁移 + 缓存自愈）
+   ├─ mobile.mjs           移动端验收测试 122 项（像素 + 计算样式 + 交互 + 人格 + 缓存自愈 + rAF 兜底）
    └─ shots.mjs            逐状态截图（日间/夜间各 7 个状态 + 桌面参考）
 ```
 
@@ -87,9 +87,10 @@ python3 ventana/serve.py
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --headless=new --remote-debugging-port=9222 \
   --user-data-dir=/tmp/ventana-cdp --no-sandbox --disable-gpu \
-  --window-size=390,844 about:blank &
+  --disable-backgrounding-occluded-windows --disable-renderer-backgrounding \
+  --disable-background-timer-throttling --window-size=390,844 about:blank &
 
-# 3) 跑验收（100 项）
+# 3) 跑验收（122 项）
 node ventana/tests/mobile.mjs /tmp/ventana-shots
 
 # 4) 想肉眼核对画面，再跑一遍截图（日间/夜间各 7 个状态 + 一张桌面参考）
@@ -98,6 +99,10 @@ node ventana/tests/shots.mjs /tmp/ventana-shots
 
 > **macOS 上必须加 `--no-sandbox`**。不加会以 `Failed to initialize sandbox` 直接崩，
 > 连调试端口都起不来（本机 DSH 沙箱限制了 Chrome 自己的沙箱初始化）。
+>
+> 后面三个 `--disable-*-background*` 是**必需**的：无头 Chrome 会把页面判成不可见
+> （`document.hidden === true`），于是**渲染帧不产生、定时器被节流**，
+> 流式打字会变成"字都到了但屏幕上一个字不出"。加上它们页面才会被当作可见。
 
 ### 这份测试怎么想问题的
 
@@ -163,11 +168,16 @@ node ventana/tests/shots.mjs /tmp/ventana-shots
 
 ## 接真实模型
 
-顶栏那个胶囊（或右边齿轮）→「连接设置」：
+顶栏那个胶囊（或右边齿轮）→「连接设置 → API 连接」：
 
-1. 连接方式切到「真实 API」
-2. 填 **Base URL**（如 `https://api.deepseek.com/v1`）、**API Key**、**模型名**
-3. 点「试一试」发一次 `max_tokens: 1` 的最小请求确认能通，再点「保存」
+1. 填 **Base URL**（如 `https://api.deepseek.com/v1`）、**API Key**、**模型名**
+2. 点「试一试」发一次 `max_tokens: 1` 的最小请求确认能通
+3. 点「保存」—— 三项齐了**自动**切到真实 API
+
+**没有"模式开关"，演示模式也不需要手动开启**：三项没填完就是演示模式，
+填完就是真实 API。这是算出来的状态，不是存下来的设置 ——
+所以不会出现"滑块停在演示模式但其实已经配好了"这种自相矛盾。
+想回到演示模式，点「清除连接」（人格不会被一起清掉）。
 
 支持任何 OpenAI 兼容端点（DeepSeek / OpenAI / Kimi / GLM / 自建）。
 **API Key 只存在本机 localStorage，由浏览器直连你填的接口，不经过任何服务器。**

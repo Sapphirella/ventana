@@ -87,6 +87,16 @@ for (const scheme of ['light', 'dark']) {
           padX: parseFloat(cs.paddingLeft) || 0,
           rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
           contentW: Math.round(body.getBoundingClientRect().width),
+          // 这行里文字实际覆盖到多远（拿子节点里最靠右的那个量）
+          textWidth: (() => {
+            var kids = body.querySelectorAll('p, pre, a, strong, code, br');
+            var max = 0;
+            for (var i = 0; i < kids.length; i++) {
+              var kr = kids[i].getBoundingClientRect();
+              if (kr.width > 0) max = Math.max(max, kr.right - rect.x);
+            }
+            return Math.round(max);
+          })(),
         };
       }),
       logRect: (() => { const r = document.querySelector('#log').getBoundingClientRect(); return { x: r.x, w: r.width }; })(),
@@ -132,11 +142,17 @@ for (const scheme of ['light', 'dark']) {
     ok(d > 24, `${label}：像素采样确认我方气泡左上角被切圆（差异 ${d}）`);
     info(`气泡底色 RGB(${inside})，左上角 RGB(${corner})`);
   }
+  /* 采样点必须避开笔画：回复短的时候，区域中心正好落在文字上，
+     文字颜色接近反色，差异自然很大 —— 那是假阳性（踩过一次）。
+     所以先量出这行里文字真正覆盖到的右边界，再在它右边采样：
+     那里不可能有文字，如果还出现"非背景"的颜色，才说明有底色。 */
+  const pageBg = img.px(4 * s, 4 * s);
   for (const r of replies) {
-    const inside = img.px((r.rect.x + r.rect.w / 2) * s, (r.rect.y + r.rect.h / 2) * s);
-    const rightEdge = img.px((r.rect.x + 6) * s, (r.rect.y + r.rect.h / 2) * s);
-    const d = Math.max(...[0, 1, 2].map(i => Math.abs(inside[i] - rightEdge[i])));
-    ok(d < 40, `${label}：像素采样确认对方回复区域没有底色（与背景差异 ${d}）`);
+    const textRight = r.rect.x + Math.max(8, Math.round(r.textWidth || r.rect.w));
+    const probeX = Math.min(r.rect.x + r.rect.w - 2, textRight + 6);
+    const probe = img.px(probeX * s, (r.rect.y + r.rect.h / 2) * s);
+    const d = Math.max(...[0, 1, 2].map(i => Math.abs(probe[i] - pageBg[i])));
+    ok(d < 24, `${label}：像素采样确认对方回复区域没有底色（文字右侧采样，与页面底色差异 ${d}）`);
   }
 }
 
@@ -212,7 +228,22 @@ await sendText('你好');
 const thinking = await evaluate(page, "(() => !!document.querySelector('#log .thinking'))()");
 ok(thinking, '发送后先出现「正在输入」三点，而不是一个空气泡');
 
-await sleep(600);
+/* 别用固定 sleep 等流式开始 —— 演示回复的长度会变，600ms 时可能还没吐出第一个字。
+   轮询等"有一条气泡正在吐字"（有字 + 有光标），最多等 3 秒。
+   注意判据要一次取样取全：先把"有字"和"有光标"分成两次问，
+   两次之间状态可能已经翻篇，会看成一个自相矛盾的结果（踩过）。 */
+let streamSample = null;
+for (let i = 0; i < 30; i++) {
+  const probe = await evaluate(page, `(() => {
+    const filled = [...document.querySelectorAll('#log .reply')]
+      .filter(el => (el.textContent || '').trim().length > 0);
+    const caret = document.querySelector('#log .caret');
+    return { filled: filled.length, caret: !!caret,
+             caretInFilled: filled.some(el => el.querySelector('.caret')) };
+  })()`);
+  if (probe.caretInFilled) { streamSample = probe; break; }
+  await sleep(100);
+}
 const streaming = await evaluate(page, `(() => {
   const caret = document.querySelector('#log .caret');
   const filled = [...document.querySelectorAll('#log .reply')]
@@ -226,7 +257,7 @@ const streaming = await evaluate(page, `(() => {
     replyRows: document.querySelectorAll('#log .reply').length,
   };
 })()`);
-ok(streaming.hasCaret, '流式过程中光标在闪');
+ok(streaming.hasCaret && !!streamSample, '流式过程中光标在闪（有字的那条气泡里）');
 ok(streaming.text > 0, `回复正在逐字吐出来（已 ${streaming.text} 字）`);
 ok(streaming.filledClean, '第一个字到达后这条气泡里的「正在输入」被撤掉');
 ok(streaming.thinkingRows <= streaming.replyRows - 1,
@@ -572,9 +603,9 @@ const captured = await evaluate(page, `(() => {
     }
     return realFetch.apply(this, arguments);
   };
-  // 切到真实 API 模式并填好三项
+  // 填好三项并保存 —— 不再有"切到真实 API"这个开关，
+  // 三项齐了就是真实 API，缺一项才走演示兜底
   document.querySelector('#openConfig').click();
-  document.querySelector('#segApi').click();
   const set = (id, v) => { const el = document.querySelector(id); el.value = v; };
   set('#cfgBase', 'https://example.com/v1');
   set('#cfgKey', 'sk-test');
@@ -717,6 +748,217 @@ const bothVersions = await evaluate(page, `Promise.all([
 })`);
 ok(bothVersions.sw && bothVersions.sw === bothVersions.html,
   `sw.js 与 index.html 的 VERSION 一致（${bothVersions.sw} / ${bothVersions.html}）`);
+
+/* ============================================================
+   十、演示模式是自动兜底，不是一个开关
+   ============================================================
+   作者反馈：「演示模式是无 API 连接时的默认模式，它不需要主动开启，
+   所以不要让它占据一个滑块板块」。这一组就是守着这件事：
+     · 界面上不该再有任何"模式选择"控件
+     · 没配 API → 自动演示模式（不碰网络，回复来自内置示例）
+     · 三项齐了 → 自动走真实 API（不需要手动切）
+     · 「清除连接」是回到演示模式的唯一入口 */
+console.log('\n=== 演示模式自动兜底 ===');
+await fresh('light');
+await evaluate(page, "(() => { document.querySelector('#openConfig').click(); return 1; })()");
+await sleep(250);
+
+const noToggle = await evaluate(page, `(() => {
+  const segs = [...document.querySelectorAll('.seg, #segMode, #segDemo, #segApi')];
+  const banner = document.querySelector('#apiBanner');
+  const cs = banner ? getComputedStyle(banner) : null;
+  return {
+    leftover: segs.length,
+    bannerShown: cs && cs.display !== 'none',
+    bannerText: banner ? banner.innerText : '',
+    inputsEnabled: [...document.querySelectorAll('#cfgBase, #cfgKey, #cfgModel')].every(el => !el.disabled),
+    hasForget: !!document.querySelector('#cfgForget'),
+    hasTest: !!document.querySelector('#cfgTest'),
+    hasSave: !!document.querySelector('#cfgSave'),
+  };
+})()`);
+ok(noToggle.leftover === 0, `界面上没有任何"模式选择"控件（残留 ${noToggle.leftover} 个）`);
+ok(noToggle.bannerShown, '有一条状态横幅说明当前处于演示模式');
+ok(noToggle.bannerText.indexOf('演示模式') >= 0,
+  `横幅说清了现在是演示模式（${noToggle.bannerText.slice(0, 30)}…）`);
+ok(noToggle.bannerText.indexOf('接口地址') >= 0 && noToggle.bannerText.indexOf('API Key') >= 0,
+  '横幅点名了还缺哪几项');
+ok(noToggle.inputsEnabled, '三项输入框一律可编辑（不再因为"演示模式"被禁用）');
+ok(noToggle.hasForget && noToggle.hasTest && noToggle.hasSave, '清除连接 / 试一试 / 保存 三个按钮都在');
+
+/* 两块之间要分开：量一下"系统提示词"标题与 API 块末端之间的距离 */
+const spacing = await evaluate(page, `(() => {
+  const groups = [...document.querySelectorAll('.cfg-inner .group')];
+  const titles = [...document.querySelectorAll('.group-title')].map(t => t.innerText);
+  const g1 = groups[0].getBoundingClientRect(), g2 = groups[1].getBoundingClientRect();
+  const firstLabel = groups[0].querySelector('input, textarea').getBoundingClientRect();
+  const title2 = document.querySelectorAll('.group-title')[1];
+  const gap = title2.getBoundingClientRect().top - g1.bottom;
+  return {
+    titles,
+    gap: Math.round(gap),
+    separated: Math.round(g2.top - g1.bottom),
+    divider: getComputedStyle(groups[1]).borderTopWidth,
+    promptTop: Math.round(document.querySelector('#cfgPrompt').getBoundingClientRect().top),
+  };
+})()`);
+ok(spacing.titles.length === 2 && spacing.titles[0].indexOf('API') >= 0
+   && spacing.titles[1].indexOf('系统提示词') >= 0,
+  `两块各有小节标题（${spacing.titles.join(' / ')}）`);
+ok(spacing.separated >= 20, `两块之间有呼吸空间（间距 ${spacing.separated}px）`);
+ok(parseFloat(spacing.divider) >= 1, `两块之间有分隔线（${spacing.divider}）`);
+
+/* 没配 API 时：不碰网络，走内置演示回复 */
+await evaluate(page, "(() => { document.querySelector('#backChat').click(); return 1; })()");
+await sleep(200);
+const demoBehavior = await evaluate(page, `(() => {
+  window.__netCalls = 0;
+  const realFetch = window.fetch;
+  window.fetch = function (url) {
+    if (String(url).indexOf('chat/completions') >= 0) window.__netCalls++;
+    return realFetch.apply(this, arguments);
+  };
+  const b = document.querySelector('#box');
+  b.value = '没配 API 时会怎么样';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(900);
+const demoNow = await evaluate(page, `({
+  netCalls: window.__netCalls,
+  streaming: !!document.querySelector('#log .caret'),
+  replies: document.querySelectorAll('#log .reply').length,
+  chip: document.querySelector('#modelTag').textContent,
+})`);
+ok(demoNow.netCalls === 0, `演示模式下完全不发网络请求（${demoNow.netCalls} 次）`);
+ok(demoNow.streaming || demoNow.replies > 1, '演示模式照样有流式输出（内置回复）');
+ok(demoNow.chip === '演示模式', `顶栏显示演示模式（${demoNow.chip}）`);
+await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
+await sleep(300);
+
+/* 只填两项 → 仍然是演示模式（不能因为"填了东西"就半途切过去） */
+await evaluate(page, `(() => {
+  document.querySelector('#openConfig').click();
+  document.querySelector('#cfgBase').value = 'https://example.com/v1';
+  document.querySelector('#cfgKey').value = 'sk-partial';
+  document.querySelector('#cfgSave').click();
+  return 1;
+})()`);
+await sleep(250);
+const partial = await evaluate(page, `({
+  banner: document.querySelector('#apiBanner').innerText,
+  chip: document.querySelector('#modelTag').textContent,
+  msg: document.querySelector('#cfgMsg').textContent,
+})`);
+ok(partial.chip === '演示模式', `只填两项时仍是演示模式（${partial.chip}）`);
+ok(partial.banner.indexOf('模型名') >= 0, `横幅点名缺的是模型名（${partial.banner.slice(0, 40)}…）`);
+ok(partial.msg.indexOf('演示模式') >= 0, `保存时明确告知仍是演示模式（${partial.msg}）`);
+
+/* 三项齐了 → 自动切到真实 API，不用点任何开关 */
+await evaluate(page, `(() => {
+  document.querySelector('#cfgModel').value = 'some-model';
+  document.querySelector('#cfgSave').click();
+  document.querySelector('#backChat').click();
+  return 1;
+})()`);
+await sleep(250);
+const ready = await evaluate(page, `(() => {
+  window.__netCalls = 0;
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') >= 0) {
+      window.__netCalls++;
+      const sse = 'data: {"choices":[{"delta":{"content":"好"}}]}\\n\\ndata: [DONE]\\n\\n';
+      return Promise.resolve(new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+    }
+    return realFetch.apply(this, arguments);
+  };
+  const b = document.querySelector('#box');
+  b.value = '现在呢';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return { chip: document.querySelector('#modelTag').textContent };
+})()`);
+await sleep(700);
+const readyNow = await evaluate(page, `({ netCalls: window.__netCalls, chip: document.querySelector('#modelTag').textContent })`);
+ok(readyNow.netCalls === 1, `三项齐了自动走真实 API，没点任何开关（网络请求 ${readyNow.netCalls} 次）`);
+ok(readyNow.chip === 'some-model', `顶栏显示模型名（${readyNow.chip}）`);
+
+/* 清除连接 → 回到演示模式，但人格要留着 */
+await evaluate(page, `(() => {
+  document.querySelector('#openConfig').click();
+  document.querySelector('#cfgPrompt').value = '我是保留下来的人格';
+  document.querySelector('#promptSave').click();
+  document.querySelector('#cfgForget').click();
+  return 1;
+})()`);
+await sleep(250);
+const forgot = await evaluate(page, `({
+  banner: document.querySelector('#apiBanner').innerText,
+  base: document.querySelector('#cfgBase').value,
+  key: document.querySelector('#cfgKey').value,
+  chip: document.querySelector('#modelTag').textContent,
+  persona: document.querySelector('#cfgPrompt').value,
+  stored: JSON.parse(localStorage.getItem('ventana.cfg') || '{}'),
+})`);
+ok(forgot.base === '' && forgot.key === '', '「清除连接」清空了接口地址与 Key');
+ok(forgot.chip === '演示模式' && forgot.banner.indexOf('演示模式') >= 0, '清除后回到演示模式');
+ok(forgot.persona.indexOf('保留下来的人格') >= 0, '清除连接不会连人格一起清掉');
+
+/* ============================================================
+   十一、rAF 不触发时，流式也必须能出字
+   ============================================================
+   为什么会想到测这个：本轮在无头 Chrome 里发现 `document.hidden === true`、
+   `requestAnimationFrame` **一次都不触发**。原来的流式渲染把绘制全压在 rAF 里，
+   于是"字都收到了、屏幕上一个字不出，只有正在输入三点一直转"。
+   真机上也有对应的场景：切到后台标签、被遮住的窗口。
+   对策是 appendDelta 里改成「rAF 与 120ms 兜底定时器谁先到谁画」。
+
+   这条测试故意把 rAF 打成空函数（比依赖环境更可靠），验证兜底路径真的能出字。 */
+console.log('\n=== rAF 失效时的兜底 ===');
+await fresh('light');
+
+await evaluate(page, `(() => {
+  window.__realRaf = window.requestAnimationFrame;
+  window.requestAnimationFrame = function () { return 0; };   // 永不回调
+  window.__rafOff = true;
+  const b = document.querySelector('#box');
+  b.value = '不许用 rAF 也要出字';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+
+/* 注意：这里的环境本来就不产帧，而页面被判定为不可见时浏览器还会**节流定时器**
+   （能到 1 秒一次）。所以兜底不是"立刻出字"，而是"最终会出字、不会永远空着"。
+   判据按这个来，别去卡具体毫秒数 —— 卡了就变成测环境的定时器精度，
+   而不是测我们的兜底逻辑。 */
+let grew = null;
+for (let i = 0; i < 25; i++) {
+  const st = await evaluate(page, `(() => {
+    const filled = [...document.querySelectorAll('#log .reply')]
+      .filter(el => (el.textContent || '').trim().length > 0);
+    const streaming = filled[filled.length - 1];
+    return {
+      chars: streaming ? streaming.textContent.replace(/\s/g, '').length : 0,
+      hasCaret: filled.some(el => el.querySelector('.caret')),
+    };
+  })()`);
+  if (st.chars >= 2 && st.hasCaret) { grew = st; break; }
+  await sleep(300);
+}
+ok(grew !== null,
+  'rAF 不触发时兜底定时器仍把字画出来，并挂上光标',
+  grew ? JSON.stringify(grew) : '等了 7.5 秒仍没出字');
+
+const rafOffNow = await evaluate(page, `!!window.__rafOff`);
+ok(rafOffNow, '（前提）requestAnimationFrame 在整段过程中一直是打桩状态');
+
+// 恢复 rAF，避免影响后面的测试
+await evaluate(page, `(() => { window.requestAnimationFrame = window.__realRaf; return 1; })()`);
+await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
+await sleep(300);
 
 console.log(`\n结果：${pass} 项通过，${fail} 项失败`);
 console.log(`截图：${OUT}/mobile-light.png, mobile-dark.png`);
