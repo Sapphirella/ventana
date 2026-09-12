@@ -176,6 +176,7 @@ git 历史里还留着 v1 的全部代码（`git show 93ff9c4:ventana/css/chat.c
 | `docs(chambre): 交接文档里的版本号改为定稿后的提交哈希` | 文档修正 |
 | `chore(chambre): 开发体验收尾 —— 不缓存的 serve.py、版本化 Service Worker、启动器接上` | 新增 `serve.py`；`index.html` 用 `sw.js?v=<VERSION>` 注册并在 `controllerchange` 时自动刷新；启动器改用 serve.py；删掉无引用的 `.brand/.logo` |
 | `refactor(ventana): 改名 Chambre → Ventana` + 同批次的 `feat(ventana): 系统提示词…` | 目录、启动器、manifest、SW 缓存名、文案全部改名；localStorage 加 `chambre.*` → `ventana.*` 迁移；设置页新增「系统提示词 · 决定它是谁」（textarea + 上传 .md/.txt/.json，整段替换）+ 独立的「保存人格」；`buildMessages()` 负责把人格作为 system 消息发出去；测试 92 项（新增迁移、人格、请求体三组） |
+| `fix(ventana): Service Worker 旧缓存自愈 + VERSION 升到 v0.4` | 缓存命中时 SW 发 `stale-page` 通知、页面收到自动刷一次（每次加载只刷一次，防循环）；`sw.js` 加 `stale-page-selftest` 钩子让这条真实通道可测（页面自己 dispatchEvent 打不到 SW 监听器）；改 sw.js 必须升 VERSION，否则浏览器 24h 内不会重取；测试 100 项 |
 
 ---
 

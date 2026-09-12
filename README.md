@@ -20,7 +20,7 @@
 | 对话与人格持久化到 localStorage | 导出 / 备份 |
 | 深浅两套主题跟随系统 | 主题手动切换、配色体系 |
 | 可安装 PWA（manifest + service worker 离线可用） | 图标与启动画面精修 |
-| 像素级自动化测试（92 项，见下文） | —— |
+| 像素级自动化测试（100 项，见下文） | —— |
 
 **方向已经调整**：原计划的"多角色 + 角色卡"**不做了**。
 现在只有一个对话对象，它的性格由「连接设置 → 系统提示词」决定。
@@ -64,7 +64,7 @@ ventana/
 └─ tests/
    ├─ cdp.mjs              零依赖 Chrome DevTools Protocol 客户端
    ├─ png.mjs              够用的小 PNG 解码器（读像素用，见下文）
-   ├─ mobile.mjs           移动端验收测试 92 项（像素 + 计算样式 + 交互 + 人格与迁移）
+   ├─ mobile.mjs           移动端验收测试 100 项（像素 + 计算样式 + 交互 + 人格与迁移 + 缓存自愈）
    └─ shots.mjs            逐状态截图（日间/夜间各 7 个状态 + 桌面参考）
 ```
 
@@ -89,7 +89,7 @@ python3 ventana/serve.py
   --user-data-dir=/tmp/ventana-cdp --no-sandbox --disable-gpu \
   --window-size=390,844 about:blank &
 
-# 3) 跑验收（92 项）
+# 3) 跑验收（100 项）
 node ventana/tests/mobile.mjs /tmp/ventana-shots
 
 # 4) 想肉眼核对画面，再跑一遍截图（日间/夜间各 7 个状态 + 一张桌面参考）
@@ -116,9 +116,13 @@ node ventana/tests/shots.mjs /tmp/ventana-shots
 
 ### 写这类测试踩过的坑（不要再踩）
 
-1. **旧 Service Worker 会骗你。** 一开始 `sw.js` 对 index.html 用缓存优先，
-   结果改了代码刷新三次还是旧页面，看起来像"改的没生效"。现在导航请求改成网络优先，
-   见 `sw.js` 顶部注释。
+1. **旧 Service Worker 会骗你 —— 已经被坑过两次。**
+   第一次：`sw.js` 对 index.html 用缓存优先，改了代码刷新三次还是旧页面（现在导航请求是网络优先）。
+   第二次（改名后）：`127.0.0.1` 打开是旧版、局域网 IP 打开是新版 —— 每个 origin 各有一份缓存，
+   而且 **`sw.js` 自己也会被浏览器缓存**（最长 24h，`no-store` 对 SW 脚本无效）。
+   对策：注册 URL 带版本号 + 缓存命中时 SW 通知页面自动刷一次。
+   **硬规矩：每次改 `sw.js` 都要同时升 `index.html` 和 `sw.js` 里的 `VERSION`。**
+   详见 `HANDOFF.md` 第 7.5 节。
 2. **`Page.addScriptToEvaluateOnNewDocument` 每次新文档都会执行。**
    用它清 localStorage 时必须在首次加载后移除，否则后面每一次刷新都会把数据洗掉，
    测出来像"持久化失效"。

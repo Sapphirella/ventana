@@ -435,7 +435,7 @@
 <div id="toast" role="status"></div>
 
 <script>
-  var VERSION = 'v0.3';
+  var VERSION = 'v0.4';
   var $ = function (s) { return document.querySelector(s); };
   var logEl = $('#log'), box = $('#box'), sendBtn = $('#send');
 
@@ -1218,11 +1218,20 @@
   if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
     var hadController = !!navigator.serviceWorker.controller;
     var reloading = false;
-    navigator.serviceWorker.addEventListener('controllerchange', function () {
-      // 新版本接管时自动刷一次，免得手机上一直看着旧代码
-      if (!hadController || reloading) return;
+    var reloadOnce = function () {
+      if (reloading) return;      // 每次加载只刷一次，避免意外循环
       reloading = true;
       location.reload();
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      // 新版本接管时自动刷一次，免得手机上一直看着旧代码
+      if (hadController) reloadOnce();
+    });
+    navigator.serviceWorker.addEventListener('message', function (ev) {
+      // Service Worker 说「这一页是从缓存里拿的旧版本」（换版本后旧 SW 还在服务，
+      // 或者断网）。在线的话刷一次就能拿到新的。
+      var d = ev.data || {};
+      if (d.type === 'stale-page' && navigator.serviceWorker.controller && navigator.onLine) reloadOnce();
     });
     navigator.serviceWorker.register('sw.js?v=' + encodeURIComponent(VERSION))
       .catch(function () {});

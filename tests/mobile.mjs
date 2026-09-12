@@ -642,6 +642,82 @@ const sent2 = await evaluate(page, `(() => window.__sent[0] || null)()`);
 ok(sent2 && sent2.messages[0].role === 'user',
   '人格为空时不发空的 system 消息（第一条直接就是 user）');
 
+/* ============================================================
+   九、被缓存坑过两次：版本自愈
+   ============================================================
+   背景（真实事故）：
+     改名后作者发现 http://127.0.0.1:5210/ 打开还是旧版 Chambre，
+     而 http://192.168.31.101:5210/ 是新版 Ventana —— 两个 origin 各有一份缓存，
+     旧 Service Worker 把旧 HTML 锁在了 127.0.0.1 这个 origin 上。
+   两个成因、两条对策，都要有测试守着：
+     1) 换了版本但旧 SW 还在服务旧缓存 → SW 命中缓存时 postMessage('stale-page')，
+        页面收到且在线时自己刷一次（staleOnce 保证每次加载只刷一次，不会循环）
+     2) sw.js **自己**也会被浏览器缓存（默认最长 24h）→ 所以每次改 sw.js 都要
+        同时升 index.html 和 sw.js 里的 VERSION，注册 URL 带上 ?v=<VERSION>。 */
+console.log('\n=== 版本自愈（Service Worker） ===');
+await fresh('dark');
+
+const swInfo = await evaluate(page, `(async () => {
+  const regs = await navigator.serviceWorker.getRegistrations();
+  const keys = await caches.keys();
+  const reg = regs[0];
+  return {
+    registered: !!reg,
+    scriptURL: reg && reg.active && reg.active.scriptURL,
+    state: reg && reg.active && reg.active.state,
+    cacheNames: keys,
+  };
+})()`);
+ok(swInfo.registered, 'Service Worker 已注册');
+ok(/sw\.js\?v=/.test(swInfo.scriptURL || ''),
+  `注册 URL 带版本号，换版本时浏览器会当成新的 SW（${swInfo.scriptURL}）`);
+const verInSw = (swInfo.scriptURL || '').split('?v=')[1];
+const verInPage = await evaluate(page, `document.querySelector('#verLine').textContent`);
+ok(verInPage.indexOf(verInSw) >= 0,
+  `页面 VERSION 与注册 URL 的版本一致（${verInSw}）`);
+ok(swInfo.cacheNames.some(n => n === 'ventana-' + verInSw),
+  `缓存名跟着版本走（${swInfo.cacheNames.join(',')}）`);
+
+/* 页面真的会响应 SW 的 stale-page 通知吗？
+   踩坑记录（三连坑，都记下来）：
+     · 想把 location.reload 换成计数器来观测 —— Chrome 里给 location.reload 赋值是
+       静默失败（不抛错也不生效），计数器永远是 0，看着像"没反应"，其实刷了。
+     · 改用在页面里累加 sessionStorage 计数 —— 一旦重启 Chrome 进程就清零，
+       跨进程跑测试时读不到，容易误判。
+     · 从页面 dispatchEvent(new MessageEvent('message')) 根本打不到
+       navigator.serviceWorker 上的监听器 —— 只有 SW 真的 postMessage 出来的消息
+       才会派发到那里（sw.js 里的 stale-page-selftest 钩子就是为了走这条真实通道）。
+   → 最终用 CDP 自己的导航事件来数刷新：`Page.frameNavigated`。它是真的"页面导航了"，
+     不依赖任何页面内的可写状态，最可靠。 */
+const navs = [];
+const offNav = page.on('Page.frameNavigated', (p) => {
+  if (!p.frame.parentId) navs.push(p.frame.url);
+});
+
+// 无关消息：走同一个真实通道，但不该引起刷新
+await evaluate(page, `(() => { navigator.serviceWorker.controller.postMessage({ type: 'nothing-to-do-with-us' }); return 1; })()`);
+await sleep(600);
+ok(navs.length === 0, `无关的 postMessage 不触发刷新（导航 ${navs.length} 次）`);
+
+// 真实通道：SW 收到自检指令后 postMessage 一条 stale-page
+await evaluate(page, `(() => { navigator.serviceWorker.controller.postMessage({ type: 'stale-page-selftest' }); return 1; })()`);
+await sleep(2200);
+ok(navs.length === 1, `收到 SW 发来的 stale-page 后自动刷新了一次（导航 ${navs.length} 次）`);
+ok(navs.length === 1 && /index\.html/.test(navs[0]), `刷新回的是同一个页面（${navs[0] || '无'}）`);
+offNav();
+
+/* sw.js 与 index.html 的版本号必须一致 —— 这条最容易忘 */
+const bothVersions = await evaluate(page, `Promise.all([
+  fetch('sw.js').then(r => r.text()),
+  fetch('index.html').then(r => r.text()),
+]).then(([sw, html]) => {
+  const a = (sw.match(/var VERSION = '([^']+)'/) || [])[1];
+  const b = (html.match(/var VERSION = '([^']+)'/) || [])[1];
+  return { sw: a, html: b };
+})`);
+ok(bothVersions.sw && bothVersions.sw === bothVersions.html,
+  `sw.js 与 index.html 的 VERSION 一致（${bothVersions.sw} / ${bothVersions.html}）`);
+
 console.log(`\n结果：${pass} 项通过，${fail} 项失败`);
 console.log(`截图：${OUT}/mobile-light.png, mobile-dark.png`);
 await page.close();
