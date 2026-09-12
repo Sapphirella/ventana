@@ -1,0 +1,854 @@
+  var VERSION = 'v0.5';
+  var $ = function (s) { return document.querySelector(s); };
+  var logEl = $('#log'), box = $('#box'), sendBtn = $('#send');
+
+  /* ---------- localStorage 键 ----------
+     从 Chambre 改名过来的。改名时**不要**把这些键改回旧的，
+     也不要删掉下面的 migrateKeys —— 已经配好的 API Key 和聊天记录
+     都存在旧键里，改名后如果直接读新键，使用者会看到"设置全没了"。 */
+  var K_CFG = 'ventana.cfg';
+  var K_MSGS = 'ventana.msgs';
+  var K_PROMPT = 'ventana.prompt';
+  var OLD_KEYS = { 'chambre.cfg': K_CFG, 'chambre.msgs': K_MSGS };
+  (function migrateKeys() {
+    try {
+      Object.keys(OLD_KEYS).forEach(function (old) {
+        var v = localStorage.getItem(old);
+        if (v !== null && localStorage.getItem(OLD_KEYS[old]) === null) {
+          localStorage.setItem(OLD_KEYS[old], v);
+        }
+      });
+    } catch (e) {}   // 无痕模式 / 禁止存储：静默跳过
+  })();
+
+  /* ---------- 配置读写（localStorage 可能被禁/不透明 origin 拒绝，一律 try/catch） ---------- */
+  var cfg = loadCfg();
+  function loadCfg() {
+    var d = { base: '', key: '', model: '', demo: true };
+    try {
+      var raw = localStorage.getItem(K_CFG);
+      if (raw) {
+        var c = JSON.parse(raw);
+        d.base = c.base || ''; d.key = c.key || ''; d.model = c.model || '';
+        d.demo = c.demo !== false;
+      }
+    } catch (e) {}
+    return d;
+  }
+  function persistCfg() {
+    try { localStorage.setItem(K_CFG, JSON.stringify(cfg)); } catch (e) {}
+  }
+
+  /* ---------- 系统提示词（人格） ----------
+     一个 textarea + 一个文件上传入口。上传就是把文件内容读进 textarea，
+     不做"导入成第二条提示词"——多份提示词怎么拼是产品决策，现在只有一份，
+     拼错了比不拼更糟。要换性格就整体替换，textarea 里永远就是最终送给模型的那段。
+     格式不限（.md / .txt / .json / .yaml 都行）：模型看到的是纯文本，
+     所谓 skill.md 只是内容长什么样的约定，不是解析格式。 */
+  var persona = { text: '', file: '' };
+  function loadPersona() {
+    try {
+      var raw = localStorage.getItem(K_PROMPT);
+      if (raw) {
+        var p = JSON.parse(raw);
+        persona.text = p.text || '';
+        persona.file = p.file || '';
+      }
+    } catch (e) {}
+  }
+  function savePersona() {
+    try { localStorage.setItem(K_PROMPT, JSON.stringify(persona)); } catch (e) {}
+  }
+
+  /* 送给模型的系统消息：留空就完全不加，不塞默认人格。
+     （演示模式下不生效——那走的是内置回复。） */
+  function buildMessages(list) {
+    var sys = (persona.text || '').trim();
+    if (!sys) return list;
+    return [{ role: 'system', content: sys }].concat(list);
+  }
+
+  /* ---------- 消息区 ----------
+     结构（和 dwell 参考一致）：
+       .row.sys > .sysline            系统事件，居中
+       .row     > .body.reply         对方回复：直接落在背景上，不是盒子
+       .row.me  > .body.bubble        我方消息：右对齐气泡
+     行与行之间由 flex gap 撑开，气泡外的留白归 .row，方便以后加头像。 */
+  var messages = [];
+  var busy = false;
+  var abortCtrl = null;
+  var currentAiEl = null;      // 正在流式接收的那个 DOM 节点
+  var currentAiMsg = null;     // 它对应的那条 localStorage 记录
+  var replyEls = [];           // 本轮回复被拆成的多个气泡
+  var cur = null;              // 演示模式当前正在吐字的气泡
+  function saveMsgs() { try { localStorage.setItem(K_MSGS, JSON.stringify(messages)); } catch (e) {} }
+  function loadMsgs() { try { var r = localStorage.getItem(K_MSGS); if (r) { messages = JSON.parse(r); if (!Array.isArray(messages)) messages = []; } } catch (e) { messages = []; } }
+
+  function clearMsgs() { messages = []; try { localStorage.removeItem(K_MSGS); } catch (e) {} }
+
+  /* 时间戳：只在「隔了足够久」或「跨天」时才插一条，不每条都盖个章 */
+  var GAP_MS = 5 * 60 * 1000;
+  var lastShownAt = 0;
+  function fmtTime(ts) {
+    var d = new Date(ts), now = new Date();
+    var hm = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+    var sameDay = d.toDateString() === now.toDateString();
+    var y = new Date(now.getTime() - 86400000);
+    if (sameDay) return hm;
+    if (d.toDateString() === y.toDateString()) return '昨天 ' + hm;
+    return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm;
+  }
+  function addStamp(ts, force) {
+    if (!force && ts - lastShownAt < GAP_MS) return;
+    if (ts - lastShownAt < 1000 && !force) return;
+    lastShownAt = ts;
+    var s = document.createElement('div');
+    s.className = 'tstamp';
+    s.textContent = fmtTime(ts);
+    logEl.appendChild(s);
+  }
+
+  function makeRow(kind) {
+    var row = document.createElement('div');
+    row.className = 'row' + (kind === 'me' ? ' me' : kind === 'sys' ? ' sys' : '');
+    var body = document.createElement('div');
+    body.className = 'body ' + (kind === 'me' ? 'bubble' : 'reply');
+    row.appendChild(body);
+    return { row: row, body: body };
+  }
+
+  /** 加一条消息。streaming=true 时先挂「正在输入」三点，等首个字到达再换成光标 */
+  function addMsg(kind, text, streaming) {
+    var r = makeRow(kind);
+    logEl.appendChild(r.row);
+    if (streaming) {
+      var th = document.createElement('div');
+      th.className = 'thinking';
+      th.innerHTML = '<i></i><i></i><i></i>';
+      r.body.appendChild(th);
+      r.body._thinking = th;
+    } else if (text) {
+      r.body.textContent = text;
+    }
+    return r.body;
+  }
+
+  function addSystem(text) {
+    var row = document.createElement('div');
+    row.className = 'row sys';
+    var s = document.createElement('div');
+    s.className = 'sysline';
+    s.textContent = text;
+    row.appendChild(s);
+    logEl.appendChild(row);
+    return s;
+  }
+
+  function restoreLog() {
+    logEl.innerHTML = '';
+    lastShownAt = 0;
+    var last = 0;
+    messages.forEach(function (m) {
+      var ts = m.at || Date.now();
+      if (!last || ts - last >= GAP_MS) addStamp(ts, !last);
+      last = ts;
+      if (m.role === 'user') {
+        addMsg('me', m.content);
+      } else {
+        var b = addMsg('ai', '', false);
+        renderMarkdown(b, m.content || '');
+      }
+    });
+  }
+  loadMsgs();
+
+  /* ---------- 滚动 ---------- */
+  var toBottomBtn = $('#toBottom');
+  function scrollLog() { logEl.scrollTop = logEl.scrollHeight; }
+  function atBottom() {
+    return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 90;
+  }
+  function scrollFollow() { if (atBottom()) scrollLog(); }
+  function syncToBottomBtn() { toBottomBtn.classList.toggle('show', !atBottom()); }
+  logEl.addEventListener('scroll', syncToBottomBtn, { passive: true });
+  toBottomBtn.addEventListener('click', function () { scrollLog(); syncToBottomBtn(); });
+
+  /* 输入卡是 fixed 的，高度随字数变化（最多 5 行）；把它写进 CSS 变量，
+     消息区的下内边距跟着走，最后一条永远不被输入卡压住。 */
+  var composerWrap = $('#composerWrap');
+  function syncComposer() {
+    var h = Math.round(composerWrap.getBoundingClientRect().height);
+    document.documentElement.style.setProperty('--composer-h', h + 'px');
+  }
+  if (window.ResizeObserver) new ResizeObserver(syncComposer).observe(composerWrap);
+  window.addEventListener('orientationchange', function () { setTimeout(syncComposer, 260); });
+
+  /* ---------- 流式渲染：合帧 + 孤尾保护（思路借鉴 dwell paintStream） ---------- */
+  var ORPHAN_TAIL = /[`*~]+$/;
+
+  /* 合帧绘制。requestAnimationFrame 把一帧内的多次增量合并成一次 DOM 写入 ——
+     但它**不保证会触发**：页面不可见时（切到后台标签页、被遮住的窗口、
+     某些无头环境）浏览器完全不产帧，`document.hidden === true` 时 rAF 会被无限期挂起。
+     真发生的话表现是：字都收到了，屏幕上一个字都不出，只有"正在输入"三点一直转 ——
+     本轮就在无头 Chrome 里撞上了这个（document.hidden 为 true，rAF 一次都不触发）。
+     所以配一个兜底定时器：谁先到谁画，画完取消另一个，保证一定落地。 */
+  var PAINT_FALLBACK_MS = 120;
+  function paintSoon(el, fn) {
+    var done = false, timer = null;
+    var run = function () {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (!el.isConnected) return;      // 气泡已经被移除（比如用户按了停止）
+      fn();
+    };
+    timer = setTimeout(run, PAINT_FALLBACK_MS);
+    // rAF 本身也包一层 try：某些环境（或被打成桩的测试环境）调用它就会抛。
+    // 抛出去的话 el._paint 永远不复位，那条气泡从此再也不会更新 —— 表现是
+    // "只有正在输入三点一直转"。踩过一次，别再让它裸奔。
+    try { requestAnimationFrame(run); } catch (e) { /* 兜底定时器已经在跑了 */ }
+  }
+
+  function appendDelta(el, t) {
+    el._raw = (el._raw || '') + t;
+    if (el._thinking) { el._thinking.remove(); el._thinking = null; }   // 第一个字到了就撤掉"正在输入"
+    if (el._paint || el._final) return;
+    el._paint = true;
+    paintSoon(el, function () {
+      el._paint = false;
+      if (el._final || !el.isConnected) return;
+      el.textContent = '';
+      el.appendChild(document.createTextNode((el._raw || '').replace(ORPHAN_TAIL, '')));
+      el.appendChild(spanCaret());
+      scrollFollow();
+    });
+  }
+  function spanCaret() {
+    var c = document.createElement('span');
+    c.className = 'caret';
+    return c;
+  }
+
+  function finalize(el, errMsg) {
+    el._final = true;
+    if (el._thinking) { el._thinking.remove(); el._thinking = null; }
+    el.textContent = '';
+    if (errMsg) {
+      el.classList.add('err');
+      el.textContent = errMsg;
+      return;
+    }
+    renderMarkdown(el, el._raw || '');
+  }
+
+  /* ---------- 落盘 ----------
+     一处容易漏的地方：用户按「停止」时，回复是半截的。
+     旧写法只在整段成功回调里 push 消息，于是被中断的那条刷新后整条消失。
+     所以改成「每次定稿就立刻把这一轮已吐出的文字写回 localStorage」。 */
+  function pushMsg(m) {
+    m.at = m.at || Date.now();
+    messages.push(m);
+    saveMsgs();
+    return m;
+  }
+  /** 把当前已定稿的若干气泡合并成一条 assistant 消息写回 */
+  function commitReply(msg, els) {
+    msg.content = els.map(function (el) { return el._raw || ''; })
+      .filter(Boolean).join('\n\n');
+    saveMsgs();
+  }
+
+  /* ---------- 轻量 markdown 渲染（定稿时调用） ---------- */
+  var URL_RE = /(https?:\/\/[^\s<>"']+)/g;
+  var INLINE_RE = /(\*\*([^*]+)\*\*)|(`([^`]+)`)|(~~([^~]+)~~)/g;
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function cleanUrl(u) {
+    var m = u.match(/[，。；：！？、,.;:!?"']+$/);
+    return m ? u.slice(0, u.length - m[0].length) : u;
+  }
+
+  function renderMarkdown(el, src) {
+    var parts = String(src || '').split(/```/);
+    for (var i = 0; i < parts.length; i++) {
+      if (i % 2 === 1) {
+        var seg = parts[i].replace(/\n$/, '');
+        var nl = seg.indexOf('\n');
+        if (nl >= 0) seg = seg.slice(nl + 1);
+        var pre = document.createElement('pre');
+        var code = document.createElement('code');
+        code.textContent = seg;
+        pre.appendChild(code);
+        el.appendChild(pre);
+      } else {
+        appendParas(el, parts[i]);
+      }
+    }
+  }
+
+  function appendParas(el, text) {
+    var paras = String(text).split(/\n\n+/);
+    for (var i = 0; i < paras.length; i++) {
+      var para = paras[i];
+      if (!para.trim()) continue;
+      var p = document.createElement('p');
+      var lines = para.split('\n');
+      for (var j = 0; j < lines.length; j++) {
+        if (j) p.appendChild(document.createElement('br'));
+        appendInline(p, lines[j]);
+      }
+      el.appendChild(p);
+    }
+  }
+
+  function appendInline(el, text) {
+    var last = 0, m, node, url;
+    while ((m = URL_RE.exec(text))) {
+      if (m.index > last) appendInlineMarkup(el, text.slice(last, m.index));
+      url = cleanUrl(m[1]);
+      node = document.createElement('a');
+      node.href = url;
+      node.target = '_blank';
+      node.rel = 'noopener noreferrer';
+      node.textContent = url;
+      el.appendChild(node);
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) appendInlineMarkup(el, text.slice(last));
+  }
+
+  function appendInlineMarkup(el, text) {
+    INLINE_RE.lastIndex = 0;
+    var last = 0, m, node;
+    while ((m = INLINE_RE.exec(text))) {
+      if (m.index > last) el.append(text.slice(last, m.index));
+      if (m[1] !== undefined) {
+        node = document.createElement('strong'); node.textContent = m[2];
+      } else if (m[3] !== undefined) {
+        node = document.createElement('code'); node.textContent = m[4];
+      } else {
+        node = document.createElement('s'); node.textContent = m[6];
+      }
+      el.appendChild(node);
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) el.append(text.slice(last));
+  }
+
+  /* ---------- 真实 API 流式（OpenAI 兼容 SSE） ---------- */
+  function streamChat(cfg_, msgs, onDelta, signal) {
+    var base = (cfg_.base || '').replace(/\/+$/, '');
+    return new Promise(function (resolve, reject) {
+      fetch(base + '/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + (cfg_.key || '')
+        },
+        body: JSON.stringify({
+          model: cfg_.model,
+          messages: msgs,
+          stream: true
+        }),
+        signal: signal
+      }).then(function (res) {
+        if (!res.ok) {
+          return res.text().then(function (t) {
+            var msg = 'HTTP ' + res.status;
+            var detail = '';
+            try { var j = JSON.parse(t); detail = j.error && (j.error.message || j.error.code) || ''; } catch (e) {}
+            reject(new Error(msg + (detail ? ' - ' + detail : '')));
+          });
+        }
+        var reader = res.body.getReader();
+        var dec = new TextDecoder();
+        var buf = '';
+        (function pump() {
+          reader.read().then(function (_a) {
+            if (_a.done) { resolve(); return; }
+            buf += dec.decode(_a.value, { stream: true });
+            var idx;
+            while ((idx = buf.indexOf('\n')) >= 0) {
+              var line = buf.slice(0, idx).trim();
+              buf = buf.slice(idx + 1);
+              if (line.indexOf('data:') !== 0) continue;
+              var data = line.slice(5).trim();
+              if (data === '[DONE]') { resolve(); return; }
+              try {
+                var j = JSON.parse(data);
+                var delta = j.choices && j.choices[0] && j.choices[0].delta;
+                var t = delta && delta.content;
+                if (t) onDelta(t);
+              } catch (e) {}
+            }
+            pump();
+          }).catch(function (err) {
+            if (err && err.name === 'AbortError') reject(new Error('已停止'));
+            else reject(err);
+          });
+        })();
+      }).catch(function (err) {
+        if (err && err.name === 'AbortError') reject(new Error('已停止'));
+        else reject(err);
+      });
+    });
+  }
+
+  /* ---------- 演示模式：内置回复模拟流式 ----------
+     故意拆成多条、彼此间留停顿 —— 真人的回复从来不是一坨，是一条一条来的。
+     接入真实 API 后这层会被真流式替换，但「多条 + 停顿」的节奏要保留。 */
+  var DEMO_REPLY = [
+    '你好，我是 **Ventana** —— 住在这台手机里的一个小房间。',
+    '现在还是演示模式：我正用内置回复跟你说话。'
+      + '流式打字、多条连发、中间那几段停顿，都已经在跑了。',
+    '想让我真的开口：\n'
+      + '1. 点右上角那枚齿轮\n'
+      + '2. 连接方式切成「真实 API」\n'
+      + '3. 填好接口地址、API Key 和模型名\n'
+      + '4. 点「试一试」确认能通，再点「保存」',
+    '然后我们就能真的聊起来。'
+  ];
+
+  function demoStream(parts, onDelta) {
+    return new Promise(function (resolve) {
+      var pi = 0, ci = 0, timer = null, emitted = false;
+      function tick() {
+        if (!busy) { timer = null; return; }        // 被用户按了停止
+        if (pi >= parts.length) { timer = null; resolve(); return; }
+        var seg = parts[pi];
+        /* 一条气泡只发一次新气泡标记，而且必须和第一个字同一次 tick 发出：
+           分开成两次会留下一个空气泡（第一个标记已经建了气泡，字还没到）。 */
+        if (ci === 0 && !emitted) { emitted = true; onDelta('__NEW__'); }
+        if (ci < seg.length) {
+          onDelta(seg[ci]); ci++;
+          timer = setTimeout(tick, 14 + Math.random() * 12);
+        } else {
+          pi++; ci = 0; emitted = false;
+          timer = setTimeout(tick, 420 + Math.random() * 520);   // 气泡之间的停顿
+        }
+      }
+      timer = setTimeout(tick, 260);
+    });
+  }
+
+  /* ---------- 发送流程 ---------- */
+  function send() {
+    if (busy) { stopChat(); return; }
+    var text = box.value.trim();
+    if (!text) return;
+
+    addStamp(Date.now());
+    addMsg('me', text);
+    pushMsg({ role: 'user', content: text });
+    scrollLog();
+
+    box.value = '';
+    autoGrow();
+    refreshSend();
+    setBusy(true);
+
+    var aiEl = addMsg('ai', '', true);
+    currentAiEl = aiEl;
+    scrollLog();
+
+    /* 先落一条空的 assistant 记录，之后每次定稿都往里补内容 ——
+       这样"停止"和"出错"都不会丢掉已经看到的那半截。 */
+    currentAiMsg = pushMsg({ role: 'assistant', content: '' });
+    replyEls = [aiEl];
+
+    if (!apiConfigured()) {
+      demoStream(DEMO_REPLY, function (t) {
+        if (t === '__NEW__') {
+          if (cur && !cur._final) { finalize(cur); commitReply(currentAiMsg, replyEls); }
+          cur = addMsg('ai', '', true);
+          replyEls.push(cur);
+          currentAiEl = cur;
+          scrollLog();
+          return;
+        }
+        appendDelta(cur, t);
+      })
+        .then(function () {
+          replyEls.forEach(function (el) { if (!el._final) finalize(el); });
+          commitReply(currentAiMsg, replyEls);
+          currentAiEl = null;
+          currentAiMsg = null;
+          setBusy(false);
+        })
+        .catch(function () {});
+    } else {
+      if (!cfg.base || !cfg.key || !cfg.model) {
+        finalize(aiEl, '连接设置没填完整，点右上角按钮去补上。');
+        currentAiEl = null;
+        currentAiMsg = null;
+        messages.pop();                       // 这条空记录没有内容，不留
+        saveMsgs();
+        setBusy(false);
+        return;
+      }
+      abortCtrl = new AbortController();
+      streamChat(cfg, buildMessages(messages), function (t) { appendDelta(aiEl, t); }, abortCtrl.signal)
+        .then(function () {
+          if (!aiEl._final) finalize(aiEl);
+          commitReply(currentAiMsg, replyEls);
+          currentAiEl = null;
+          currentAiMsg = null;
+          setBusy(false);
+        })
+        .catch(function (err) {
+          if (!aiEl._final) finalize(aiEl, '没接上：' + (err.message || '网络出问题了'));
+          commitReply(currentAiMsg, replyEls);
+          currentAiEl = null;
+          currentAiMsg = null;
+          setBusy(false);
+        });
+    }
+  }
+
+  function stopChat() {
+    if (abortCtrl) { try { abortCtrl.abort(); } catch (e) {} abortCtrl = null; }
+    /* 要撤的是「还没吐出字」的那条（停顿期间已经建好、只有三点的那个），
+       不是 last —— last 是下一条，已经定稿，删掉会把上一条一起带走。 */
+    if (currentAiEl && !currentAiEl._final) {
+      currentAiEl._final = true;
+      if (currentAiEl._thinking) { currentAiEl._thinking.remove(); currentAiEl._thinking = null; }
+      if (currentAiEl._raw) {
+        currentAiEl.textContent = '';
+        renderMarkdown(currentAiEl, currentAiEl._raw);
+      }
+    }
+    for (var i = replyEls.length - 1; i >= 0; i--) {
+      var el = replyEls[i];
+      if (el._final && (el._raw || '').length) continue;   // 有内容的留着
+      var r = el.parentNode;
+      if (r) r.remove();
+      replyEls.splice(i, 1);
+    }
+    if (!replyEls.length) {
+      // 一条都没留下来：给个交代，别让屏幕像什么都没发生
+      var note = addMsg('ai', '', false);
+      note.classList.add('err');
+      note.textContent = '停下了。';
+      replyEls.push(note);
+    }
+    if (currentAiMsg) commitReply(currentAiMsg, replyEls);
+    cur = null;
+    currentAiEl = null;
+    currentAiMsg = null;
+    setBusy(false);
+  }
+
+  function setBusy(b) {
+    busy = b;
+    sendBtn.classList.toggle('stop', b);
+    sendBtn.disabled = b ? false : !box.value.trim();
+  }
+
+  /* ---------- 输入框丝滑 ---------- */
+  function autoGrow() {
+    box.style.height = 'auto';
+    box.style.height = Math.min(box.scrollHeight, 132) + 'px';
+    syncComposer();
+  }
+  function refreshSend() {
+    if (!busy) sendBtn.disabled = !box.value.trim();
+  }
+
+  box.addEventListener('input', function () { autoGrow(); refreshSend(); });
+  box.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      send();
+    }
+  });
+  sendBtn.addEventListener('click', send);
+
+  /* ---------- 顶部标签 / 视图切换 ---------- */
+  var modelTag = $('#modelTag'), ctxChip = $('#ctxChip');
+  function updateModelTag() {
+    var ready = apiConfigured();
+    modelTag.textContent = ready ? cfg.model : '演示模式';
+    ctxChip.classList.toggle('live', ready);
+    var who = persona.file || (persona.text.trim() ? '自定义人格' : '');
+    ctxChip.title = (ready ? '当前模型：' + cfg.model : '还没有连上模型，回复来自内置示例')
+      + (who ? ' · 人格：' + who : ' · 未设人格');
+  }
+
+  function showView(which) {
+    $('#viewChat').classList.toggle('hidden', which !== 'chat');
+    $('#viewConfig').classList.toggle('hidden', which !== 'config');
+  }
+
+  function openConfig() { fillCfgForm(); showView('config'); }
+  $('#openConfig').addEventListener('click', openConfig);
+  ctxChip.addEventListener('click', openConfig);
+  $('#backChat').addEventListener('click', function () {
+    // 还没点保存就走了的话，输入框里的内容不该丢 —— 静默存下来
+    if (fPrompt && fPrompt.value !== persona.text) savePrompt(true);
+    showView('chat');
+  });
+
+  /* ---------- 配置页 ---------- */
+  var apiBanner = $('#apiBanner');
+  var fBase = $('#cfgBase'), fKey = $('#cfgKey'), fModel = $('#cfgModel');
+  var fPrompt = $('#cfgPrompt'), promptStat = $('#promptStat'), promptFileInput = $('#promptFile');
+  var cfgMsg = $('#cfgMsg');
+  var PROMPT_SOFT_LIMIT = 8000;       // 字数超过就提示（不是硬限制）
+
+  function sayMsg(t, bad) {
+    cfgMsg.textContent = t || '';
+    cfgMsg.className = 'ap-msg' + (bad ? ' bad' : '');
+  }
+
+  function updatePromptStat() {
+    var n = (persona.text || '').length;
+    if (!n) {
+      promptStat.textContent = '还没写。空着就是通用助手，没有性格。';
+      promptStat.className = 'hint';
+      return;
+    }
+    var msg = (persona.file ? persona.file + ' · ' : '') + n + ' 字';
+    if (n > PROMPT_SOFT_LIMIT) {
+      msg += '（偏长了，每轮都会整段发给模型，建议压到 ' + PROMPT_SOFT_LIMIT + ' 字以内）';
+      promptStat.className = 'hint bad';
+    } else {
+      msg += ' · 每轮对话都会带上';
+      promptStat.className = 'hint ok';
+    }
+    promptStat.textContent = msg;
+  }
+
+  /* 当前用不用真实 API —— **算出来的，不是存下来的**。
+     上一版有个「演示模式 / 真实 API」的滑块（cfg.demo 存在 localStorage 里），
+     它的问题是会和实际配置脱节：三项都填好了但滑块停在演示模式，或者反过来。
+     现在只认一个事实：三项齐了就调 API，缺一项就走演示兜底。
+     于是演示模式不需要用户"开启"，它就是未配置状态的默认行为。 */
+  function apiConfigured() {
+    return !!(cfg.base && cfg.key && cfg.model);
+  }
+
+  function renderBanner() {
+    apiBanner.classList.add('show');
+    if (apiConfigured()) {
+      apiBanner.innerHTML = '已连接 · <b>' + escapeHtml(cfg.model) + '</b>'
+        + '　改完三项记得点「保存」。';
+    } else {
+      var missing = [];
+      if (!cfg.base) missing.push('接口地址');
+      if (!cfg.key) missing.push('API Key');
+      if (!cfg.model) missing.push('模型名');
+      apiBanner.innerHTML = '现在是<b>演示模式</b>：还没有连上模型，'
+        + '回复来自 App 内置的示例，不是真的角色。<br>'
+        + '把' + missing.join('、') + '填好并保存，就会自动切过去 —— 不用手动开关。';
+    }
+  }
+
+  function fillCfgForm() {
+    fBase.value = cfg.base; fKey.value = cfg.key; fModel.value = cfg.model;
+    fPrompt.value = persona.text || '';
+    updatePromptStat();
+    renderBanner();
+    sayMsg('');
+  }
+
+  /* 人格：保存按钮单独走一条路。
+     它和 API 三项是两回事 —— 只想改性格的人不该被"API 三项没填完"挡住。 */
+  function savePrompt(quiet) {
+    persona.text = fPrompt.value;
+    savePersona();
+    updatePromptStat();
+    updateModelTag();
+    if (!quiet) toast(persona.text.trim() ? '人格已保存' : '人格已清空');
+  }
+
+  $('#promptSave').addEventListener('click', function () { savePrompt(); });
+
+  $('#promptClear').addEventListener('click', function () {
+    fPrompt.value = '';
+    persona.file = '';
+    savePrompt(true);
+    sayMsg('已清空人格。');
+    toast('人格已清空');
+  });
+
+  $('#promptUpload').addEventListener('click', function () { promptFileInput.click(); });
+
+  promptFileInput.addEventListener('change', function () {
+    var file = promptFileInput.files && promptFileInput.files[0];
+    if (!file) return;
+    var MAX = 400 * 1024;              // 400KB：再大就不是提示词了
+    if (file.size > MAX) {
+      sayMsg('文件太大（' + Math.round(file.size / 1024) + 'KB），请不要超过 400KB。', true);
+      promptFileInput.value = '';
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      persona.text = String(reader.result || '');
+      persona.file = file.name;
+      fPrompt.value = persona.text;
+      savePersona();
+      updatePromptStat();
+      updateModelTag();
+      sayMsg('已读入 ' + file.name + '（' + persona.text.length + ' 字），检查一遍内容再决定要不要改。');
+      toast(file.name + ' 已读入');
+    };
+    reader.onerror = function () { sayMsg('这个文件读不出来，换一个试试。', true); };
+    reader.readAsText(file, 'utf-8');
+    promptFileInput.value = '';        // 允许重复选同一个文件
+  });
+
+  /* 在设置页按 Ctrl/⌘ + S 保存（人格和 API 一起），手机上不适用但桌面顺手 */
+  document.addEventListener('keydown', function (e) {
+    if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
+      if ($('#viewConfig').classList.contains('hidden')) return;
+      e.preventDefault();
+      savePrompt(true);
+      $('#cfgSave').click();
+    }
+  });
+
+  $('#cfgSave').addEventListener('click', function () {
+    cfg.base = fBase.value.trim();
+    cfg.key = fKey.value.trim();
+    cfg.model = fModel.value.trim();
+    savePrompt(true);                    // 人格跟着一起存，避免以为存了其实没存
+    persistCfg();
+    updateModelTag();
+    renderBanner();
+    if (!apiConfigured()) {
+      sayMsg('已保存。连接三项还没齐，仍然走演示模式。');
+      toast('已保存 · 仍是演示模式');
+      return;
+    }
+    sayMsg('已保存，已连上 ' + cfg.model + '。');
+    toast('设置已保存');
+  });
+
+  /* 清除连接 —— 这也是"回到演示模式"的唯一入口，
+     免得用户为了试试演示模式去手动删 Key。 */
+  $('#cfgForget').addEventListener('click', function () {
+    cfg.base = ''; cfg.key = ''; cfg.model = '';
+    persistCfg();
+    fillCfgForm();
+    updateModelTag();
+    sayMsg('连接已清除，回到演示模式。人格保留着。');
+    toast('已回到演示模式');
+  });
+
+  $('#cfgTest').addEventListener('click', function () {
+    var base = fBase.value.trim().replace(/\/+$/, '');
+    var key = fKey.value.trim();
+    var model = fModel.value.trim();
+    if (!base || !key || !model) { sayMsg('先把三项填完再试。', true); return; }
+    sayMsg('正在敲门…');
+    var btn = this;
+    btn.disabled = true;
+    fetch(base + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+      body: JSON.stringify({
+        model: model,
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 1,
+        stream: false
+      })
+    }).then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (t) {
+          var d = '';
+          try { var j = JSON.parse(t); d = (j.error && (j.error.message || j.error.code)) || ''; } catch (e) {}
+          sayMsg('没通（HTTP ' + r.status + '）' + (d ? ' - ' + d : ''), true);
+        });
+      }
+      return r.json().then(function (j) {
+        sayMsg('通了 —— 对面回的模型是 ' + (j.model || '(没报名字)'));
+      });
+    }).catch(function (err) {
+      sayMsg('没通：' + err.message, true);
+    }).then(function () { btn.disabled = false; });
+  });
+
+  $('#cfgClear').addEventListener('click', function () {
+    clearMsgs();
+    logEl.innerHTML = '';
+    lastShownAt = 0;
+    welcome();
+    toast('对话已清空');
+  });
+
+  /* ---------- toast ---------- */
+  var toastEl = $('#toast'), toastTimer = null;
+  function toast(t) {
+    toastEl.textContent = t;
+    toastEl.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 1900);
+  }
+
+  /* ---------- 欢迎语 ---------- */
+  function welcome() {
+    var b = addMsg('ai', '', false);
+    var h = document.createElement('p');
+    h.className = 'hello';
+    h.textContent = 'Ventana';
+    b.appendChild(h);
+    renderMarkdown(b,
+      '你好，我是 **Ventana** —— 住在这台手机里的一个小房间。\n\n'
+      + (apiConfigured()
+          ? '已经接上真实模型了，随时可以开始。'
+          : '现在还没有连上模型，我说的话来自 App 内置的示例 —— 不是真的角色。'
+            + '点顶栏那枚齿轮填好接口、Key 和模型名，我就会换成真的。')
+    );
+  }
+
+  /* ---------- 启动 ---------- */
+  loadPersona();
+  updateModelTag();
+  syncComposer();
+
+  /* 移动端键盘：interactive-widget=resizes-content 已由浏览器接管；这里兜底适配 */
+  if (window.visualViewport) {
+    var lastVV = window.visualViewport.height;
+    window.visualViewport.addEventListener('resize', function () {
+      var h = window.visualViewport.height;
+      if (lastVV - h > 60 && atBottom() && window.visualViewport.offsetTop > 0) {
+        setTimeout(function () { scrollLog(); syncComposer(); }, 60);
+      }
+      lastVV = h;
+      syncComposer();
+    });
+  }
+
+  if (messages.length) { restoreLog(); scrollLog(); } else { welcome(); }
+  syncToBottomBtn();
+
+  /* PWA 注册：仅 http(s) 下生效，直接双击打开 file:// 时自动跳过。
+     版本号写在 sw.js 的注册 URL 里 —— 换了版本浏览器就会当成新的 Service Worker
+     去安装，装上后 activate 清掉旧缓存。不加这一句，"改了代码看不到"会反复出现。 */
+  if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
+    var hadController = !!navigator.serviceWorker.controller;
+    var reloading = false;
+    var reloadOnce = function () {
+      if (reloading) return;      // 每次加载只刷一次，避免意外循环
+      reloading = true;
+      location.reload();
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      // 新版本接管时自动刷一次，免得手机上一直看着旧代码
+      if (hadController) reloadOnce();
+    });
+    navigator.serviceWorker.addEventListener('message', function (ev) {
+      // Service Worker 说「这一页是从缓存里拿的旧版本」（换版本后旧 SW 还在服务，
+      // 或者断网）。在线的话刷一次就能拿到新的。
+      var d = ev.data || {};
+      if (d.type === 'stale-page' && navigator.serviceWorker.controller && navigator.onLine) reloadOnce();
+    });
+    navigator.serviceWorker.register('sw.js?v=' + encodeURIComponent(VERSION))
+      .catch(function () {});
+  }
+
+  $('#verLine').textContent = 'Ventana ' + VERSION + ' · 单文件 PWA';

@@ -441,8 +441,12 @@ ok(branding.visibleHasOldName === false, '渲染出来的文字里没有 "Chambr
 
 /* 源码里还留着旧名字是**故意**的：localStorage 迁移那一段必须写清旧键叫什么。
    但除了那里，代码里不该再有旧品牌词（注释、路径、cache 名都算）。 */
-const sourceLeaks = await evaluate(page, `fetch('index.html').then(r => r.text()).then(t => {
-  const lines = t.split(String.fromCharCode(10)).filter(l => l.indexOf('Chambre') >= 0);
+const sourceLeaks = await evaluate(page, `Promise.all([
+  fetch('index.html').then(r => r.text()),
+  fetch('app.js').then(r => r.text()),
+]).then(([html, js]) => {
+  const lines = (html + String.fromCharCode(10) + js)
+    .split(String.fromCharCode(10)).filter(l => l.indexOf('Chambre') >= 0);
   return { total: lines.length, sample: lines.slice(0, 3) };
 })`);
 ok(sourceLeaks.total <= 3, `源码里的旧名字只剩迁移注释那几处（${sourceLeaks.total} 行）`,
@@ -740,14 +744,14 @@ offNav();
 /* sw.js 与 index.html 的版本号必须一致 —— 这条最容易忘 */
 const bothVersions = await evaluate(page, `Promise.all([
   fetch('sw.js').then(r => r.text()),
-  fetch('index.html').then(r => r.text()),
-]).then(([sw, html]) => {
+  fetch('app.js').then(r => r.text()),
+]).then(([sw, js]) => {
   const a = (sw.match(/var VERSION = '([^']+)'/) || [])[1];
-  const b = (html.match(/var VERSION = '([^']+)'/) || [])[1];
-  return { sw: a, html: b };
+  const b = (js.match(/var VERSION = '([^']+)'/) || [])[1];
+  return { sw: a, app: b };
 })`);
-ok(bothVersions.sw && bothVersions.sw === bothVersions.html,
-  `sw.js 与 index.html 的 VERSION 一致（${bothVersions.sw} / ${bothVersions.html}）`);
+ok(bothVersions.sw && bothVersions.sw === bothVersions.app,
+  `sw.js 与 app.js 的 VERSION 一致（${bothVersions.sw} / ${bothVersions.app}）`);
 
 /* ============================================================
    十、演示模式是自动兜底，不是一个开关
