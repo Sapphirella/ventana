@@ -1776,4 +1776,4 @@
       .catch(function () {});
   }
 
-  $('#verLine').textContent = 'Ventana ' + VERSION + ' · 单文件 PWA';
+  $('#verLine').textContent = 'Ventana ' + VERSION + ' · 本地存储 · 无服务器';
