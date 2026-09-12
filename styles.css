@@ -155,6 +155,90 @@
     35% { opacity: 1; transform: translateY(-3px); } }
   .reply.err { color: var(--err); }
 
+  /* ---------- 每条消息下面的一行小菜单 ---------- */
+  .acts {
+    display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap;
+  }
+  .row.me .acts { justify-content: flex-end; }
+  .act {
+    padding: 7px 10px; min-height: 32px;
+    border-radius: 8px; font-size: 12px; line-height: 1;
+    color: var(--text-2); background: transparent;
+    transition: background .15s ease, color .15s ease;
+  }
+  .act:active { background: var(--bg-2); color: var(--text); }
+  .act.danger:active { color: var(--err); }
+  /* 桌面端有悬停，可以更收敛一点；手机上保持常驻可见 */
+  @media (hover: hover) {
+    .act { opacity: .55; }
+    .row:hover .act, .act:focus-visible { opacity: 1; }
+  }
+
+  /* 输入卡上方的"正在输入" */
+  .typingbar {
+    position: fixed; left: 0; right: 0; z-index: 4;
+    bottom: calc(var(--composer-h) + 4px);
+    display: none; gap: 5px; justify-content: center; align-items: center;
+    pointer-events: none; height: 20px;
+  }
+  .typingbar.show { display: flex; }
+  .typingbar i {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--text-2);
+    animation: bounce 1.1s infinite ease-in-out;
+  }
+  .typingbar i:nth-child(2) { animation-delay: .16s; }
+  .typingbar i:nth-child(3) { animation-delay: .32s; }
+
+  /* 记忆馆入口上的数字 */
+  .chip .count {
+    flex: none; min-width: 15px; padding: 0 4px; border-radius: 8px;
+    background: var(--accent-bg); color: var(--accent-fg);
+    font-size: 10.5px; line-height: 15px; text-align: center;
+  }
+
+  /* ---------- 记忆馆 / 归档列表 ---------- */
+  .listwrap {
+    flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    padding: 16px 16px calc(24px + env(safe-area-inset-bottom));
+  }
+  .listwrap .inner { max-width: 620px; margin: 0 auto; }
+  .empty-note {
+    color: var(--text-2); font-size: 13px; line-height: 1.9;
+    padding: 34px 10px; text-align: center;
+  }
+  .item {
+    border-bottom: 1px solid var(--line); padding: 14px 2px;
+  }
+  .item:last-child { border-bottom: 0; }
+  .item h3 {
+    font-size: 15px; font-weight: 600; line-height: 1.5;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .item h3 time {
+    flex: none; font-size: 11.5px; font-weight: 400; color: var(--text-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .item p {
+    margin-top: 6px; font-size: 13.5px; line-height: 1.75; color: var(--text);
+    white-space: pre-wrap; word-break: break-word;
+    display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .item.open p { -webkit-line-clamp: unset; display: block; }
+  .item .meta { margin-top: 6px; font-size: 11.5px; color: var(--text-2); }
+  .item .acts2 { display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
+  .item .acts2 button {
+    padding: 7px 10px; border-radius: 8px; font-size: 12px; min-height: 32px;
+    color: var(--text-2);
+  }
+  .item .acts2 button:active { background: var(--bg-2); color: var(--text); }
+  .item .acts2 button.danger:active { color: var(--err); }
+  .section-h {
+    font-size: 13px; font-weight: 600; letter-spacing: .6px; color: var(--text-2);
+    margin: 22px 0 4px;
+  }
+  .section-h:first-child { margin-top: 0; }
+
   /* 回到底部：翻了历史才浮出来，不硬拽视口 */
   #toBottom {
     position: fixed; right: 16px; z-index: 6;
@@ -280,6 +364,19 @@
     text-underline-offset: 3px; padding: 6px; }
   .cfg-foot .ver { font-size: 11.5px; color: var(--text-2); opacity: .7;
     letter-spacing: .3px; }
+
+  /* 资料库列表项 */
+  .docitem {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; margin-bottom: 8px;
+    border: 1px solid var(--line); border-radius: 12px; background: var(--bg-2);
+  }
+  .docinfo { flex: 1; min-width: 0; }
+  .docinfo b {
+    display: block; font-size: 14px; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .docinfo span { display: block; font-size: 11.5px; color: var(--text-2); margin-top: 2px; }
 
   /* ---------- toast ---------- */
   #toast {

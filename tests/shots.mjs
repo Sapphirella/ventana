@@ -65,12 +65,37 @@ for (const scheme of ['light', 'dark']) {
   await sleep(400);
   await shot(`05-${scheme}-长文本与代码块`);
 
-  // 连接设置页
+  // 连接设置页（含系统提示词、资料库、会话三块）
   await evaluate(page, "(() => { document.querySelector('#openConfig').click(); return 1; })()");
   await sleep(250);
   await shot(`06-${scheme}-连接设置`);
   await evaluate(page, "(() => { document.querySelector('#backChat').click(); return 1; })()");
   await sleep(150);
+
+  // 记忆馆（先塞两条记忆和一段归档会话，否则是空态）
+  await evaluate(page, `(() => {
+    const now = Date.now();
+    localStorage.setItem('ventana.memory', JSON.stringify([
+      { id: 'm1', at: now - 86400000, title: '她喜欢下雨天', body: '说过三次，雨天会想起小时候。', from: '' },
+      { id: 'm2', at: now, title: '聊过世界设定', body: '前面聊了很多设定，摘要：……', from: '' },
+    ]));
+    const st = JSON.parse(localStorage.getItem('ventana.convs') || '{"convs":[],"activeId":null}');
+    st.convs.push({ id: 'old1', title: '上周那次长谈', createdAt: now - 7 * 86400000,
+      updatedAt: now - 7 * 86400000, archived: true,
+      messages: [
+        { role: 'user', content: '我们聊了很久', at: now - 7 * 86400000 },
+        { role: 'assistant', content: '嗯，我记着。', at: now - 7 * 86400000 + 1000 },
+      ] });
+    localStorage.setItem('ventana.convs', JSON.stringify(st));
+    return 1;
+  })()`);
+  await goto(page, URL_);
+  await sleep(300);
+  await evaluate(page, "(() => { document.querySelector('#openMemory').click(); return 1; })()");
+  await sleep(300);
+  await shot(`09-${scheme}-记忆馆`);
+  await evaluate(page, "(() => { document.querySelector('#memBack').click(); return 1; })()");
+  await sleep(200);
 
   // 键盘弹起后（用缩小视口模拟）
   await page.send('Emulation.setDeviceMetricsOverride', {

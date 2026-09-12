@@ -9,11 +9,11 @@
 ## 0. 三十秒版本
 
 - **是什么**：AI 虚拟角色聊天 App，静态网页 + PWA，手机为主。
-- **在哪**：`人机恋/ventana/`，整个 App 就是 `index.html` 一个文件。
+- **在哪**：`人机恋/ventana/`，三个文件：`index.html`（结构）+ `styles.css`（样式）+ `app.js`（逻辑）。
 - **叫什么**：Ventana（2026-09-12 从 Chambre 改名）。git 历史里的提交信息还写着 `chambre`，那是历史，别改。
 - **怎么跑**：`python3 ventana/serve.py`（不缓存、打印手机访问地址），或双击 `Ventana启动.command`。
-- **怎么测**：起无头 Chrome（**必须 `--no-sandbox`**）后 `node ventana/tests/mobile.mjs`，46 项。
-- **当前状态**：对话界面能用 + 可设人格（系统提示词）；配色是黑白试验版；**多角色已确定不做**。
+- **怎么测**：起无头 Chrome（**必须 `--no-sandbox`**，另加三个 `--disable-*-background*`）后 `node ventana/tests/mobile.mjs`，186 项。
+- **当前状态**：对话 + 人格 + 资料库（按需读文档）+ 记忆馆 + 会话归档都能用；配色是黑白试验版；**多角色已确定不做**。
 - **最要紧的规矩**：改完代码**同步改 `README.md` 和这份文档**，然后 git 提交。
 
 ---
@@ -48,48 +48,43 @@ git 历史里还留着 v1 的全部代码（`git show 93ff9c4:ventana/css/chat.c
 
 ---
 
-## 2. 代码地图（`index.html`，约 1000 行）
+## 2. 代码地图
 
-单文件但分区明确，按顺序读：
+**先看结构**：`index.html`（140 行，只有结构）/ `styles.css`（380 行，只有样式）/
+`app.js`（约 1900 行，全部逻辑）。加功能前**先确认该放哪一层** ——
+不要再把逻辑写回 HTML 的 `<script>` 里。
+
+### app.js 的段落顺序就是它的数据流
 
 | 区段 | 内容 | 关键点 |
 |---|---|---|
-| `<style>` 开头 | CSS 变量（`:root` + `prefers-color-scheme: dark`） | 改配色只动这里；`--me-bg/--me-line/--code-*` 是主题相关的三组 |
-| 顶部栏 / 消息区 / 输入卡 | 布局 CSS | `.row > .body` 是核心结构，见 README「界面约定」 |
-| 配置页 / toast / reduced-motion | 其余 CSS | `@media (prefers-reduced-motion)` 里关掉动画 |
-| `migrateKeys` | 旧 `chambre.*` → 新 `ventana.*` 的一次性搬迁 | **别删**，删了老用户的设置全丢 |
-| `loadCfg/persistCfg` | 配置读写（localStorage） | key: `ventana.cfg`；**没有** `demo` 字段，见第 10 节 |
-| `apiConfigured/renderBanner` | 演示模式判定与状态横幅 | 三项齐了才走真实 API |
-| 消息区 JS | `messages` 数组、`addMsg/addStamp/restoreLog` | key: `ventana.msgs`；结构 `{role, content, at}` |
-| `loadPersona/savePersona/buildMessages` | 系统提示词（人格） | key: `ventana.prompt`，结构 `{text, file}` |
-| 设置页 JS | `fillCfgForm/savePrompt/文件上传` | 人格与 API 分开保存，互不阻塞 |
-| 滚动 | `atBottom/scrollFollow/syncToBottomBtn` | 只有本来就在底部才自动跟随 |
-| `syncComposer` | 把输入卡实测高度写进 `--composer-h` | ResizeObserver 驱动 |
-| `paintSoon/appendDelta/finalize` | 流式渲染（合帧 + 孤尾保护） | ★ `paintSoon` 是 rAF **加**兜底定时器，见第 9 节；`ORPHAN_TAIL` 去掉未配对的 `**` 尾巴 |
-| `pushMsg/commitReply` | 落盘 | ★ **每次定稿就写回**，见下文「坑 3」 |
-| `streamChat` | OpenAI 兼容 SSE 客户端 | `fetch` + `ReadableStream` 手动切 `data:` 行 |
-| `demoStream` | 演示模式 | 拆成 4 段，段间 420–940ms 停顿 |
-| `send/stopChat/setBusy` | 发送与中断 | 中断逻辑不简单，改之前先看注释 |
-| `welcome` | 空库时的欢迎语 | |
+| 键名常量 + `migrateKeys` | localStorage 的七个键 | ★ 见第 10 节，别删迁移 |
+| `readJSON/writeJSON/uid` | 存储与配额 | 写失败会 toast 提示，不静默丢数据 |
+| **会话 store** | `store.convs` / `current` / `msgs()` | 一个会话对象持有 `messages`；归档只是打标记 |
+| **资料库 docs** | `loadDocs/addDoc/findDoc/docIndexText` | 只存本地；`docIndexText` 才是进提示词的那份索引 |
+| **记忆馆 memories** | `loadMemories/addMemory/memoryIndexText` | AI 写、用户删；索引进提示词，正文按需取 |
+| 配置与人格 | `loadCfg/loadPersona/buildMessages` | ★ `buildMessages` = 人格 + 文档索引 + 记忆索引 |
+| 消息区渲染 | `addMsg/addSystem/restoreLog/attachActions` | 菜单是 `.acts` 一行，挂在 `.body` 之后 |
+| 消息菜单 | `actionMenu/doCopy/doDelete/doRegen` | 直接改存储，不是只改界面 |
+| 滚动 / 输入卡 | `syncComposer/scrollFollow` | `--composer-h` 由 JS 实测写入 |
+| 流式渲染 | `paintSoon/appendDelta/finalize` | ★ rAF **加**兜底定时器，见第 9 节 |
+| **流式请求** | `streamChat` | 带 tools；参数是**分片**流进来的，必须按 index 拼 |
+| **文本协议** | `MARK_RE/runAction/runToolCalls` | `[[读/记/忆]]` 是 tools 的退路 |
+| **发送流程** | `send/runDemo/runApi` | ★ `runApi` 是**多轮循环**，见第 12 节 |
+| 配置页 / 记忆馆 / 归档 | `fillCfgForm/renderMemory/renderArchives` | |
+| 启动 | 文件末尾 | 顺序：`loadStore → loadDocs → loadMemories → loadPersona` |
 
-### 三个容易改错的地方
+### 四个最容易改错的地方
 
-**1. 停止（`stopChat`）**
-一轮回复可能是**多条气泡**（`replyEls` 数组）。点停止时要撤掉的是
-「还没吐出字的那条」，不是数组里最后一条——最后一条是已经定稿的下一条，
-删它会把内容一起带走。撤完还要 `commitReply` 把已吐出的文字落盘，
-否则刷新后那半截话就没了。
-
-**2. 落盘（`pushMsg` / `commitReply`）**
-老写法只在"整段成功回调"里 push 消息，于是**用户中途按停止的那条，刷新后整条消失**。
-现在是：先落一条空的 assistant 记录，每次定稿往里补内容。
-改流式逻辑时不要退回旧写法（`tests/mobile.mjs` 里有断言守着恢复后的行数）。
-
-**3. 演示模式的 `__NEW__` 标记**
-`demoStream` 通过 `onDelta('__NEW__')` 告诉调用方"该起新气泡了"。
-这个标记必须**和第一个字在同一次 tick 发出**，分开发会留下一个空气泡。
-
----
+1. **停止（`stopChat`）**：一轮回复可能是**多条气泡**（工具调用会把它打断）。
+   要撤的是"还没吐出字的那条"，不是数组最后一条 —— 见第 6 节。
+2. **落盘（`pushMsg`/`commitReply`）**：先落一条空的 assistant 记录，每次定稿往里补，
+   否则用户中途按停止的那条刷新后就没了。
+3. **`doRegen`**：要先把旧回复的 DOM 节点拆掉再 `beginReply()`。
+   不拆的话 `currentAiMsg` 指向的对象已经从数组里 splice 掉了，
+   新老记录会互相盖（看起来像"重新生成没生效"）。
+4. **菜单挂载（`attachActions`）必须幂等**：重新渲染会走同一条路径，
+   不判断的话菜单叠成两层，按钮数会翻倍。
 
 ## 3. 测试基建（改代码前先跑一遍）
 
@@ -102,7 +97,9 @@ git 历史里还留着 v1 的全部代码（`git show 93ff9c4:ventana/css/chat.c
   它也不打印局域网地址，手机上不好开。
 - `png.mjs`：自己写的 PNG 解码器。**这是本项目的核心测试资产**——
   它让"画出来是什么样"变成可断言的东西。扩展测试时优先用它，别退回读 CSS 声明。
-- `mobile.mjs`：46 项，分四组（气泡形态 / 布局与安全区 / 交互流程 / 黑白约束）。
+- `mobile.mjs`：186 项，按主题分组：气泡形态 / 布局与安全区 / 交互流程 / 横向溢出与设置页 /
+  黑白约束 / 品牌与数据迁移 / 系统提示词 / 请求体里的 system 消息 / 版本自愈 /
+  演示模式自动兜底 / rAF 失效兜底 / 资料库按需读取 / 气泡菜单 / 会话归档 / 记忆馆。
   组内断言的具体判据都写在文件注释里。
 
 ### 写测试的四个坑（都真踩过）
@@ -179,6 +176,8 @@ git 历史里还留着 v1 的全部代码（`git show 93ff9c4:ventana/css/chat.c
 | `refactor(ventana): 改名 Chambre → Ventana` + 同批次的 `feat(ventana): 系统提示词…` | 目录、启动器、manifest、SW 缓存名、文案全部改名；localStorage 加 `chambre.*` → `ventana.*` 迁移；设置页新增「系统提示词 · 决定它是谁」（textarea + 上传 .md/.txt/.json，整段替换）+ 独立的「保存人格」；`buildMessages()` 负责把人格作为 system 消息发出去；测试 92 项（新增迁移、人格、请求体三组） |
 | `fix(ventana): Service Worker 旧缓存自愈 + VERSION 升到 v0.4` | 缓存命中时 SW 发 `stale-page` 通知、页面收到自动刷一次（每次加载只刷一次，防循环）；`sw.js` 加 `stale-page-selftest` 钩子让这条真实通道可测（页面自己 dispatchEvent 打不到 SW 监听器）；改 sw.js 必须升 VERSION，否则浏览器 24h 内不会重取；测试 122 项 |
 | `feat(ventana): 演示模式改成自动兜底（去掉模式滑块）+ 系统提示词独立成块` | 删掉「连接方式」滑块与 `cfg.demo` 字段，改为按三项是否填完判定；加状态横幅与「清除连接」；两块之间加间距与分隔线；顺手修掉无头环境 rAF 不触发导致"字不显示"的问题（`paintSoon` 兜底）；测试 122 项 |
+| `refactor(ventana): 单文件拆成 index.html + styles.css + app.js` | 为接下来的四个大功能腾出可读性；SW 预缓存补上新文件（预缓存列表变了必须升 VERSION） |
+| `feat(ventana): 资料库 / 气泡菜单 / 会话归档 / 记忆馆 四个功能` | 资料库按需读取（索引进提示词、正文 tools 或 `[[读:]]` 索取）；每条气泡下 复制/重新生成/删除；会话归档（打标记 + 导出 txt + 取消归档）；记忆馆由 AI 读写摘要；修掉 showTyping 不显示、记忆不重排、归档删除不刷新、重新生成留空壳四个 bug；测试 186 项 |
 
 ---
 
@@ -310,7 +309,75 @@ Ventana.setContextProvider({
 
 ---
 
-## 11. 需要问作者的事
+## 11. 四个新功能怎么设计的（2026-09-12 加）
+
+这一节记的是**为什么这么设计**，不是代码 —— 代码在 `app.js` 里，
+上面第 2 节有地图。
+
+### 资料库：为什么是"索引 + 按需读取"
+
+用户的原话是「上传的文档可能字数会非常多，我希望系统可以自动把文档解析成一个 skill，
+按需读取，这样不烧 token」。做法：
+
+- 文档正文只存 localStorage，**不进提示词**；
+- 提示词里只放一行索引：`- 《名字》（3200 字）：开头 60 字…`；
+- 模型要正文时自己索取。**两条路都留着**：
+  - 原生 tools（`read_doc`）—— 支持的端点最可靠
+  - 文本协议 `[[读:名字]]` —— 端不支持 tools、或小模型不老实走 function calling 时的退路
+  - 端点第一次拒绝 tools 时（`/tool|function|param/` 命中错误信息）会自动关掉 tools 重试一次，
+    不让"不支持"变成"不能用"
+- 用户可见：聊天里会多一行 `读了《…》`，读文档这件事是**看得见**的，不偷偷读
+
+为什么不用向量检索：当前文档量是"几份到几十份"，按名字索取就够了。
+真要检索式 RAG，接口点是 `docIndexText()` / `findDoc()`，换掉它们即可。
+
+### 气泡菜单：为什么在气泡下面，为什么直接改存储
+
+- 放气泡**下面**而不是悬浮：悬浮按钮在手机上要么挡字、要么要长按。常驻一行小字最直接。
+- 按钮数量按角色区分：我方消息没有"重新生成"（没有"重新生成我"这种需求）。
+- **菜单直接改存储**（`doDelete` 会 splice 会话里的消息并落盘），不是只改界面 ——
+  否则刷新一下删掉的东西又回来了。
+- 「重新生成」的语义是"从这条回答开始往后全丢，再问一次"，所以它天然支持
+  "从断掉的地方接着来"。
+- 生成过程中**不挂菜单**：挂了也能点，但点了会出错。
+
+### 会话归档：为什么用"打标记"而不是"移动数据"
+
+`archived: true` 只是标记，会话始终躺在同一个数组里。好处：
+「取消归档」是无损的、迁移时不用担心丢东西、归档列表按 `createdAt` 排序也不受影响。
+归档后**立刻开一个新会话**，不留"当前会话是已归档的"这种怪状态。
+
+导出是纯文本（不引任何库），文件名用会话标题。删除有二次确认。
+
+### 记忆馆：为什么只给 AI 写、不给用户建
+
+用户的设计意图是「完全由 AI 按需读写」。所以记忆馆里**没有"新建"按钮** ——
+只提供看、展开、复制、删。这样它不会退化成又一个需要人维护的表单。
+写入路径和读文档同构：tools（`save_memory` / `read_memory`）+ 文本协议（`[[记:…]]` / `[[忆:…]]`）。
+
+### 这一轮的四个真 bug（都是加功能时新引入的）
+
+| bug | 症状 | 原因 |
+|---|---|---|
+| `showTyping` 永远不显示 | "正在输入"从未出现 | 先 `if (!typingEl) return` 才去创建元素 —— 判断写在了创建之前 |
+| 记忆列表不重排 | 新写的记忆挂在列表末尾 | `addMemory` 排了，但"AI 刚写完"和"从存储读出来"是两条路径，渲染前没统一排 |
+| 归档删除不刷新 | 删掉了但列表还在 | 删完只 `renderMemory()`，漏了 `renderArchives()` |
+| 重新生成留下空壳 | 点了之后多出一条空回答 | 拆旧节点与 `currentAiMsg` 的指向没对上，见第 2 节第 3 条 |
+
+### 测试夹具自身的三个坑（比 app 的 bug 更花时间）
+
+1. **手写 SSE 时把 `\n` 写成了字面量**：出站串里是"反斜杠 + n"而不是换行，
+   客户端按行切不出 `data:` 前缀，整个响应被静默忽略 ——
+   看起来像"模型没输出任何东西"或"模型没提工具调用"，其实是夹具的错。
+   **为此加了 `sseBody()` 助手并把 `SSE_FN` 注入页面**，别再手写。
+2. **`SSE_FN`（页面侧助手）和 `sseBody`（Node 侧）不是一回事**：假 `fetch` 跑在浏览器里，
+   Node 作用域的函数它看不到，直接用会 ReferenceError（然后请求静默失败）。
+3. **假回答是毫秒级完成的**，所以"点完立刻断言 busy"必然会翻车。
+   要断言的是可观察的结果（请求发出、角色序列、消息条数），不是瞬时状态。
+
+---
+
+## 12. 需要问作者的事
 
 以下几件事接手时**不要自己拍板**，先问：
 

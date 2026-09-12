@@ -30,6 +30,20 @@ const ok = (cond, name, extra = '') => {
 };
 const info = (s) => console.log(`    · ${s}`);
 
+/* ---------- 造一个假的 SSE 响应体 ----------
+   血泪教训：手写 'data: {...}\n\n' 这种字面量时，一旦多写一层反斜杠，
+   出站串里就是**两个字面的反斜杠 + n**，而不是换行。
+   客户端按行切分时切不出 `data:` 前缀，于是整个响应被静默忽略 ——
+   表现是"模型没输出任何东西"，看着像 app 的 bug，其实是测试夹具的 bug。
+   本项目为此浪费过一整轮排查。所以统一用这个函数造 SSE，别再手写。 */
+const sseBody = (deltas) => deltas.map((d) =>
+  'data: ' + JSON.stringify({ choices: [{ delta: d }] }) + '\n\n').join('') + 'data: [DONE]\n\n';
+
+/* 注入到页面里用：把一串 delta 拼成 SSE 响应体。
+   必须**定义在页面里**（不能只在 Node 侧定义）—— 测试里的假 fetch 跑在浏览器上下文，
+   Node 作用域里的函数它看不到（踩过：ReferenceError 之后整个请求静默失败）。 */
+const SSE_FN = "var sseBody = function (deltas) { return deltas.map(function (d) { return 'data: ' + JSON.stringify({ choices: [{ delta: d }] }) + String.fromCharCode(10) + String.fromCharCode(10); }).join('') + 'data: [DONE]' + String.fromCharCode(10) + String.fromCharCode(10); };";
+
 const page = await connect();
 await page.send('Runtime.enable');
 await page.send('Page.enable');
@@ -87,6 +101,15 @@ for (const scheme of ['light', 'dark']) {
           padX: parseFloat(cs.paddingLeft) || 0,
           rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
           contentW: Math.round(body.getBoundingClientRect().width),
+          // 我方气泡：菜单栏加在 .body 内部之后，.body 的高度已经含菜单，
+          // 圆角采样必须打在这层（.bubble）的左上角上，不然采到的是菜单那一带
+          bubbleRect: (() => {
+            var b = body.classList.contains('bubble') ? body : body.querySelector('.bubble');
+            if (!b) return null;
+            var br = b.getBoundingClientRect();
+            return { x: Math.round(br.x), y: Math.round(br.y),
+                     w: Math.round(br.width), h: Math.round(br.height) };
+          })(),
           // 这行里文字实际覆盖到多远（拿子节点里最靠右的那个量）
           textWidth: (() => {
             var kids = body.querySelectorAll('p, pre, a, strong, code, br');
@@ -136,10 +159,18 @@ for (const scheme of ['light', 'dark']) {
   const s = img.width / probe.viewport.w;   // = DPR
 
   for (const r of mines) {
-    const inside = img.px((r.rect.x + r.rect.w / 2) * s, (r.rect.y + r.rect.h / 2) * s);
-    const corner = img.px((r.rect.x + 2) * s, (r.rect.y + 1.5) * s);
+    const bb = r.bubbleRect || r.rect;
+    const inside = img.px((bb.x + bb.w / 2) * s, (bb.y + bb.h / 2) * s);
+    const corner = img.px((bb.x + 2) * s, (bb.y + 1.5) * s);
+    const pageBg = img.px(4 * s, 4 * s);
     const d = Math.max(...[0, 1, 2].map(i => Math.abs(inside[i] - corner[i])));
-    ok(d > 24, `${label}：像素采样确认我方气泡左上角被切圆（差异 ${d}）`);
+    /* 判据用「角落 = 页面底色」而不是「角落与气泡底色差很多」：
+       日间是浅灰气泡铺在白底上（255 vs 242，只差 13），差值的绝对值没有意义，
+       有意义的是"角落那块地儿根本没被气泡盖住"。这个判据与配色无关。 */
+    const cornerIsBg = Math.max(...[0, 1, 2].map(i => Math.abs(corner[i] - pageBg[i]))) < 12;
+    const centerNotBg = Math.max(...[0, 1, 2].map(i => Math.abs(inside[i] - pageBg[i]))) >= 8;
+    ok(cornerIsBg && centerNotBg,
+      `${label}：像素采样确认我方气泡左上角被切圆（角落=底色:${cornerIsBg} 中心≠底色:${centerNotBg} 差值 ${d}）`);
     info(`气泡底色 RGB(${inside})，左上角 RGB(${corner})`);
   }
   /* 采样点必须避开笔画：回复短的时候，区域中心正好落在文字上，
@@ -225,8 +256,14 @@ console.log('\n=== 交互流程 ===');
 await fresh('light');
 await sendText('你好');
 
-const thinking = await evaluate(page, "(() => !!document.querySelector('#log .thinking'))()");
-ok(thinking, '发送后先出现「正在输入」三点，而不是一个空气泡');
+const thinking = await evaluate(page, "(() => !!document.querySelector('#typing.show'))()");
+ok(thinking, '发送后先出现「正在输入」指示器（在输入卡上方，不占气泡）');
+const noEmptyBubble = await evaluate(page, `(() => {
+  const rows = [...document.querySelectorAll('#log .reply')];
+  const last = rows[rows.length - 1];
+  return !last || (last.textContent || '').trim().length > 0;
+})()`);
+ok(noEmptyBubble, '那一刻聊天区里没有空气泡');
 
 /* 别用固定 sleep 等流式开始 —— 演示回复的长度会变，600ms 时可能还没吐出第一个字。
    轮询等"有一条气泡正在吐字"（有字 + 有光标），最多等 3 秒。
@@ -597,6 +634,7 @@ await fresh('light');
 /* 用假的 fetch 截住请求：不真的联网，只看发出去什么 */
 const captured = await evaluate(page, `(() => {
   window.__sent = [];
+  ${SSE_FN}
   const realFetch = window.fetch;
   window.fetch = function (url, init) {
     if (String(url).indexOf('chat/completions') >= 0) {
@@ -631,8 +669,10 @@ if (sent) {
   ok(sent.messages[0].role === 'system', '请求体第一条是 system 消息');
   ok(sent.messages[0].content.indexOf('你是 Nook') >= 0,
     `system 内容就是输入框里那段（${String(sent.messages[0].content).slice(0, 20)}…）`);
-  ok(sent.messages[1].role === 'user' && sent.messages[1].content === '在吗',
-    'system 之后紧跟用户消息');
+  /* 进门那条欢迎语现在是**真实消息**（会进历史），所以 system 后面第一条不一定
+     是刚发的那句。判据改成"历史里有它"。 */
+  ok(sent.messages.slice(1).some(m => m.role === 'user' && m.content === '在吗'),
+    '刚发的用户消息在历史里（欢迎语也是一条真实消息）');
   ok(sent.model === 'test-model' && sent.stream === true, '模型名与 stream 参数正确');
 }
 
@@ -640,6 +680,7 @@ if (sent) {
 await fresh('light');
 const noPersona = await evaluate(page, `(() => {
   window.__sent = [];
+  ${SSE_FN}
   const realFetch = window.fetch;
   window.fetch = function (url, init) {
     if (String(url).indexOf('chat/completions') >= 0) {
@@ -657,6 +698,7 @@ await goto(page, URL_);
 await sleep(300);
 await evaluate(page, `(() => {
   window.__sent = [];
+  ${SSE_FN}
   const realFetch = window.fetch;
   window.fetch = function (url, init) {
     if (String(url).indexOf('chat/completions') >= 0) {
@@ -674,8 +716,8 @@ await evaluate(page, `(() => {
 })()`);
 await sleep(800);
 const sent2 = await evaluate(page, `(() => window.__sent[0] || null)()`);
-ok(sent2 && sent2.messages[0].role === 'user',
-  '人格为空时不发空的 system 消息（第一条直接就是 user）');
+ok(sent2 && !sent2.messages.some(m => m.role === 'system'),
+  '人格为空时整个请求里没有 system 消息（不塞空人格）');
 
 /* ============================================================
    九、被缓存坑过两次：版本自愈
@@ -800,15 +842,16 @@ const spacing = await evaluate(page, `(() => {
   const gap = title2.getBoundingClientRect().top - g1.bottom;
   return {
     titles,
+    titleCount: document.querySelectorAll('.cfg-inner .group-title').length,
     gap: Math.round(gap),
     separated: Math.round(g2.top - g1.bottom),
     divider: getComputedStyle(groups[1]).borderTopWidth,
     promptTop: Math.round(document.querySelector('#cfgPrompt').getBoundingClientRect().top),
   };
 })()`);
-ok(spacing.titles.length === 2 && spacing.titles[0].indexOf('API') >= 0
+ok(spacing.titles.length >= 2 && spacing.titles[0].indexOf('API') >= 0
    && spacing.titles[1].indexOf('系统提示词') >= 0,
-  `两块各有小节标题（${spacing.titles.join(' / ')}）`);
+  `设置页分块且各有标题（${spacing.titles.join(' / ')}）`);
 ok(spacing.separated >= 20, `两块之间有呼吸空间（间距 ${spacing.separated}px）`);
 ok(parseFloat(spacing.divider) >= 1, `两块之间有分隔线（${spacing.divider}）`);
 
@@ -817,6 +860,7 @@ await evaluate(page, "(() => { document.querySelector('#backChat').click(); retu
 await sleep(200);
 const demoBehavior = await evaluate(page, `(() => {
   window.__netCalls = 0;
+  ${SSE_FN}
   const realFetch = window.fetch;
   window.fetch = function (url) {
     if (String(url).indexOf('chat/completions') >= 0) window.__netCalls++;
@@ -869,6 +913,7 @@ await evaluate(page, `(() => {
 await sleep(250);
 const ready = await evaluate(page, `(() => {
   window.__netCalls = 0;
+  ${SSE_FN}
   const realFetch = window.fetch;
   window.fetch = function (url, init) {
     if (String(url).indexOf('chat/completions') >= 0) {
@@ -963,6 +1008,564 @@ ok(rafOffNow, '（前提）requestAnimationFrame 在整段过程中一直是打�
 await evaluate(page, `(() => { window.requestAnimationFrame = window.__realRaf; return 1; })()`);
 await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
 await sleep(300);
+
+/* ============================================================
+   十二、资料库：文档按需读取，不烧 token
+   ============================================================
+   要点：上传的文档**不进提示词**（否则每一轮都在为它付钱），
+   提示词里只有一份"标题 + 开头 60 字"的索引，模型需要时用
+   tools 或 [[读:名字]] 索取全文。这组测试盯的就是这条边界。 */
+console.log('\n=== 资料库与按需读取 ===');
+await fresh('light');
+
+/* 准备：配好 API（用假 fetch 截住请求）+ 上传两份文档 */
+const DOC_A = '## 世界观\n\n这是一份很长很长的设定文档。'.repeat(20);
+const DOC_B = '日记正文：今天下雨了。'.repeat(30);
+await evaluate(page, `(() => {
+  localStorage.setItem('ventana.cfg', JSON.stringify({ base: 'https://example.com/v1', key: 'sk', model: 'm' }));
+  localStorage.setItem('ventana.prompt', JSON.stringify({ text: '你是一个安静的人。', file: '' }));
+  return 1;
+})()`);
+await goto(page, URL_);
+await evaluate(page, "(() => { document.querySelector('#openConfig').click(); return 1; })()");
+await sleep(200);
+
+const upload = await evaluate(page, `(() => {
+  const dt = new DataTransfer();
+  dt.items.add(new File([${JSON.stringify(DOC_A)}], '世界观.md', { type: 'text/markdown' }));
+  dt.items.add(new File([${JSON.stringify(DOC_B)}], '日记.txt', { type: 'text/plain' }));
+  const input = document.querySelector('#docFile');
+  input.files = dt.files;
+  input.dispatchEvent(new Event('change'));
+  return 1;
+})()`);
+await sleep(500);
+const docState = await evaluate(page, `(() => ({
+  stored: JSON.parse(localStorage.getItem('ventana.docs') || '[]').map(d => d.name),
+  listed: [...document.querySelectorAll('#docList .docitem b')].map(b => b.textContent),
+  promptUntouched: JSON.parse(localStorage.getItem('ventana.prompt')).text,
+  promptBox: document.querySelector('#cfgPrompt').value,
+}))()`);
+ok(docState.stored.length === 2, `两份文档进了资料库（${docState.stored.join('、')}）`);
+ok(docState.listed.length === 2, `设置页列出了这两份（${docState.listed.join('、')}）`);
+ok(docState.promptUntouched === '你是一个安静的人。',
+  '上传文档**没有**覆盖系统提示词');
+ok(docState.promptBox === undefined || docState.promptBox === '你是一个安静的人。',
+  '提示词输入框里的内容也没被改动');
+
+/* 关键：请求体里只有索引，没有全文 */
+await evaluate(page, "(() => { document.querySelector('#backChat').click(); return 1; })()");
+await sleep(200);
+const promptCheck = await evaluate(page, `(() => {
+  window.__sent = [];
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') >= 0) {
+      window.__sent.push(JSON.parse(init.body));
+      const sse = 'data: {"choices":[{"delta":{"content":"好"}}]}\\n\\ndata: [DONE]\\n\\n';
+      return Promise.resolve(new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+    }
+    return realFetch.apply(this, arguments);
+  };
+  const b = document.querySelector('#box');
+  b.value = '你好';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(800);
+const body1 = await evaluate(page, `(() => window.__sent[0] || null)()`);
+ok(!!body1, '发出了请求');
+if (body1) {
+  const sys = body1.messages[0];
+  ok(sys.role === 'system', '有 system 消息');
+  ok(sys.content.indexOf('安静的人') >= 0, 'system 里有系统提示词');
+  ok(sys.content.indexOf('世界观.md') >= 0 && sys.content.indexOf('日记.txt') >= 0,
+    'system 里有文档索引（两个文件名都出现了）');
+  ok(sys.content.indexOf('这是一份很长很长的设定文档。'.repeat(3)) < 0,
+    'system 里**没有**文档全文（索引里只截了开头 60 字）');
+  ok(sys.content.length < 800,
+    `system 整体很短，没被文档撑大（${sys.content.length} 字）`);
+  ok(Array.isArray(body1.tools) && body1.tools.length >= 2,
+    `请求里带了 tools（${(body1.tools || []).map(t => t.function.name).join(', ')}）`);
+}
+
+/* 原生工具调用：模型要求读文档 → 我们给全文 → 再问一次 */
+const toolRound = await evaluate(page, `(() => {
+  window.__sent = [];
+  let n = 0;
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') < 0) return realFetch.apply(this, arguments);
+    window.__sent.push(JSON.parse(init.body));
+    n++;
+    const sse = n === 1
+      // 参数故意拆成两个分片（真实端点就是这么流的）
+      ? sseBody([
+          { tool_calls: [{ index: 0, id: 'call_1', type: 'function',
+            function: { name: 'read_doc', arguments: '{"na' } }] },
+          { tool_calls: [{ index: 0,
+            function: { arguments: 'me":"世界观"}' } }] },
+        ])
+      : sseBody([{ content: '读完了，设定里说是这样。' }]);
+    return Promise.resolve(new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+  };
+  const b = document.querySelector('#box');
+  b.value = '世界观是什么';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(1200);
+const rounds = await evaluate(page, `(() => ({
+  count: window.__sent.length,
+  secondHasTool: (window.__sent[1] && window.__sent[1].messages || []).some(m => m.role === 'tool'),
+  toolContent: ((window.__sent[1] && window.__sent[1].messages || []).filter(m => m.role === 'tool')[0] || {}).content || '',
+  sysLines: [...document.querySelectorAll('#log .sysline')].map(s => s.textContent),
+  lastReply: (() => {
+    const rs = [...document.querySelectorAll('#log .reply')];
+    return rs.length ? rs[rs.length - 1].textContent : '';
+  })(),
+}))()`);
+ok(rounds.secondHasTool, '第二轮请求里带上了 role=tool 的结果');
+ok(rounds.toolContent.indexOf('这是一份很长很长的设定文档') >= 0,
+  '工具结果里是文档**全文**（按需才拉进来）');
+ok(rounds.sysLines.some(t => t.indexOf('读了《世界观.md》') >= 0),
+  `聊天里留下了一行系统事件（${rounds.sysLines.join(' / ')}）`);
+ok(rounds.lastReply.indexOf('读完了') >= 0,
+  `工具调用之后的正文落在新的气泡里（${rounds.lastReply.slice(0, 20)}）`);
+
+/* 文本协议兜底：模型直接写 [[读:名字]] 也要认 */
+await evaluate(page, `(() => {
+  window.__sent = [];
+  let n = 0;
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') < 0) return realFetch.apply(this, arguments);
+    window.__sent.push(JSON.parse(init.body));
+    n++;
+    const payload = n === 1
+      ? '我去翻翻。\\n[[读:日记.txt]]'
+      : '翻到了，日记里写着下雨。';
+    const sse = 'data: ' + JSON.stringify({ choices: [{ delta: { content: payload } }] }) + '\\n\\ndata: [DONE]\\n\\n';
+    return Promise.resolve(new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+  };
+  const b = document.querySelector('#box');
+  b.value = '日记里写了什么';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(1200);
+const textProto = await evaluate(page, `(() => ({
+  count: window.__sent.length,
+  replied: (window.__sent.map(x => x.messages).flat().some(m =>
+    m.role === 'user' && String(m.content).indexOf('日记正文') >= 0)),
+  markersLeaked: [...document.querySelectorAll('#log .reply')].some(el => el.textContent.indexOf('[[读') >= 0),
+  sysLines: [...document.querySelectorAll('#log .sysline')].map(s => s.textContent),
+}))()`);
+ok(textProto.count === 2, `文本协议也触发了第二轮（共 ${textProto.count} 次）`);
+ok(textProto.replied, '执行结果（文档正文）回给了模型');
+ok(!textProto.markersLeaked, '标记本身没有漏进聊天气泡里（用户不该看到 [[读:…]]）');
+ok(textProto.sysLines.some(t => t.indexOf('读了《日记.txt》') >= 0), '文本协议同样留下系统事件');
+
+/* 删掉一份资料 */
+await evaluate(page, "(() => { document.querySelector('#openConfig').click(); return 1; })()");
+await sleep(200);
+await evaluate(page, "(() => { document.querySelector('#docList [data-dact=del]').click(); return 1; })()");
+await sleep(200);
+const afterDel = await evaluate(page, `JSON.parse(localStorage.getItem('ventana.docs') || '[]').map(d => d.name)`);
+ok(afterDel.length === 1, `删除一份后资料库里剩一份（${afterDel.join('、')}）`);
+
+/* ============================================================
+   十三、气泡菜单：复制 / 重新生成 / 删除
+   ============================================================ */
+console.log('\n=== 气泡菜单 ===');
+await fresh('light');
+await sendText('第一条，用来测菜单');
+await sleep(1600);
+await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
+await sleep(400);
+
+const menus = await evaluate(page, `(() => {
+  const rows = [...document.querySelectorAll('#log .row')];
+  return rows.map(r => ({
+    kind: r.classList.contains('me') ? 'me' : 'ai',
+    buttons: [...r.querySelectorAll('.act')].map(b => b.getAttribute('data-act')),
+    menuBelowBody: (() => {
+      const acts = r.querySelector('.acts');
+      const body = r.querySelector('.body');
+      if (!acts || !body) return null;
+      return Math.round(acts.getBoundingClientRect().top - body.getBoundingClientRect().top);
+    })(),
+  }));
+})()`);
+const meRow = menus.filter(m => m.kind === 'me')[0];
+const aiRow = menus.filter(m => m.kind === 'ai')[0];
+ok(menus.length >= 2, `每条消息都有菜单栏（共 ${menus.length} 行）`);
+ok(meRow && meRow.buttons.indexOf('copy') >= 0 && meRow.buttons.indexOf('del') >= 0,
+  `我方气泡有 复制 / 删除（${meRow && meRow.buttons.join(',')}）`);
+ok(meRow && meRow.buttons.indexOf('regen') < 0, '我方气泡没有"重新生成"（那是给对方回复用的）');
+ok(aiRow && aiRow.buttons.indexOf('copy') >= 0 && aiRow.buttons.indexOf('del') >= 0
+   && aiRow.buttons.indexOf('regen') >= 0,
+  `AI 气泡有 复制 / 重新生成 / 删除（${aiRow && aiRow.buttons.join(',')}）`);
+ok(meRow && meRow.menuBelowBody > 0, '菜单栏在气泡**下方**（不是悬浮在气泡上）');
+
+/* 点击区域够不够手指点 */
+const tapSize = await evaluate(page, `(() => {
+  const b = document.querySelector('.act').getBoundingClientRect();
+  return { w: Math.round(b.width), h: Math.round(b.height) };
+})()`);
+ok(tapSize.h >= 28 && tapSize.w >= 30,
+  `菜单按钮的点击区域够手指用（${tapSize.w}×${tapSize.h}）`);
+
+/* 删除一条：DOM 和存储都要少一条 */
+const beforeDelMsg = await evaluate(page, `(() => ({
+  // 只数真正的消息行（.row.me / .row:not(.me):not(.sys)）。
+  // 用 :not(.sys) 会把时间戳行算进去 —— 删掉最后一条时间戳可能一起消失，
+  // 于是"少一行"变成"少两行"，看着像 app 多删了（踩过一次）。
+  dom: document.querySelectorAll('#log .row.me, #log .reply').length,
+  stored: JSON.parse(localStorage.getItem('ventana.convs')).convs[0].messages.length,
+}))()`);
+await evaluate(page, "(() => { document.querySelector('#log .row.me .act[data-act=del]').click(); return 1; })()");
+await sleep(350);
+const afterDelMsg = await evaluate(page, `(() => ({
+  dom: document.querySelectorAll('#log .row.me, #log .reply').length,
+  stored: JSON.parse(localStorage.getItem('ventana.convs')).convs[0].messages.length,
+  firstIsAssistant: (() => {
+    const m = JSON.parse(localStorage.getItem('ventana.convs')).convs[0].messages;
+    return m.length ? m[0].role : null;
+  })(),
+}))()`);
+ok(afterDelMsg.stored === beforeDelMsg.stored - 1,
+  `删除后存储里少一条（${beforeDelMsg.stored} → ${afterDelMsg.stored}）`);
+/* 为什么不直接数 DOM 行数：删掉一条消息后，如果它是"最后一条带时间戳的"，
+   时间戳行会一起消失（隔 5 分钟才补一条），于是"少一行"变成"少两行"，
+   看起来像 app 多删了。改成重新加载后对比：DOM 必须与存储完全一致。 */
+await goto(page, URL_);
+await sleep(300);
+const rebuilt = await evaluate(page, `(() => ({
+  dom: document.querySelectorAll('#log .row.me, #log .reply').length,
+  stored: JSON.parse(localStorage.getItem('ventana.convs')).convs[0].messages.length,
+}))()`);
+ok(rebuilt.dom === rebuilt.stored && rebuilt.stored === afterDelMsg.stored,
+  `刷新后 DOM 与存储一致（DOM ${rebuilt.dom} / 存储 ${rebuilt.stored}）`);
+
+/* 重新生成：把这一条往后丢掉，重新问一次 */
+await fresh('light');
+await sendText('请你回答一次');
+await sleep(1400);
+await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
+await sleep(400);
+/* 注意：光写 localStorage 不够 —— 页面里的 cfg 是启动时读进内存的，
+   写存储不会让它切到 API 模式。必须刷新，否则"重新生成"走的是演示模式（踩过）。 */
+await evaluate(page, `(() => {
+  localStorage.setItem('ventana.cfg', JSON.stringify({ base: 'https://example.com/v1', key: 'sk', model: 'm' }));
+  return 1;
+})()`);
+await goto(page, URL_);
+await sleep(400);
+const beforeRegen = await evaluate(page, `(() => {
+  window.__sent = [];
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') >= 0) {
+      window.__sent.push(JSON.parse(init.body));
+      return Promise.resolve(new Response(sseBody([{ content: '重新生成后的回答' }]),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+    }
+    return realFetch.apply(this, arguments);
+  };
+  return {
+    stored: JSON.parse(localStorage.getItem('ventana.convs')).convs[0].messages.length,
+    model: document.querySelector('#modelTag').textContent,
+  };
+})()`);
+/* 要点的必须是"真正那条回答"上的重新生成 —— 进门那条欢迎语排在前面，
+   它前面没有用户提问，点了会被（正确地）拒绝。踩过一次。 */
+await evaluate(page, `(() => {
+  const rows = [...document.querySelectorAll('#log .row')];
+  // 从后往前找：第一条带"重新生成"的 AI 行，且它前面已经有用户消息
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const btn = rows[i].querySelector('.act[data-act=regen]');
+    const hasUserBefore = rows.slice(0, i).some(r => r.classList.contains('me'));
+    if (btn && hasUserBefore) { btn.click(); return 1; }
+  }
+  return 0;
+})()`);
+await sleep(300);
+await sleep(500);   // 让假回答把这一轮走完，状态才是稳定的
+const regenState = await evaluate(page, `(() => ({
+  busy: document.querySelector('#send').classList.contains('stop'),
+  sent: (window.__sent || []).length,
+  stored: JSON.parse(localStorage.getItem('ventana.convs')).convs[0].messages.length,
+  roles: JSON.parse(localStorage.getItem('ventana.convs')).convs[0].messages.map(m => m.role),
+}))()`);
+ok(regenState.sent >= 1, `重新生成真的发出了请求（${regenState.sent} 次）`);
+/* 别断言"点完立刻是 busy 状态"：假回答在毫秒级就结束了，busy 会翻回去，
+   属于假阳性来源。要断言的是"旧回答被丢掉了、并且重新要了一次"。 */
+/* 断言写成"角色序列结构"而不是"assistant 的条数"：
+   进门那条欢迎语本身就是一条 assistant，所以条数一定是 2，写 1 是错的。
+   正确的判据是：结构必须是「欢迎语 + 我那句 + 一条新回答」——
+   旧回答的位置被新回答取代，没有多出第二条回答，也没有留下空壳。 */
+ok(regenState.roles.join(',') === 'assistant,user,assistant',
+  `旧回答被新回答取代，结构没变（${regenState.roles.join(',')}）`);
+ok(regenState.stored === beforeRegen.stored,
+  `重新生成没有增减消息条数（${beforeRegen.stored} → ${regenState.stored}）`);
+ok(regenState.roles[regenState.roles.length - 1] === 'assistant',
+  '最后一条是新的回答（不是悬空等待）');
+ok(beforeRegen.model === 'm', `（前提）页面确实在 API 模式（顶栏显示 ${beforeRegen.model}）`);
+await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
+await sleep(300);
+
+/* ============================================================
+   十四、会话归档
+   ============================================================ */
+console.log('\n=== 会话归档 ===');
+await fresh('light');
+await sendText('这是第一个会话说的话');
+await sleep(1200);
+await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
+await sleep(300);
+
+await evaluate(page, "(() => { document.querySelector('#openConfig').click(); document.querySelector('#convArchive').click(); return 1; })()");
+await sleep(400);
+const archived = await evaluate(page, `(() => {
+  const st = JSON.parse(localStorage.getItem('ventana.convs'));
+  return {
+    total: st.convs.length,
+    archived: st.convs.filter(c => c.archived).length,
+    activeCount: st.convs.filter(c => !c.archived).length,
+    archivedMsgs: st.convs.filter(c => c.archived)[0].messages.length,
+    domRows: document.querySelectorAll('#log .row:not(.sys)').length,
+    // 新会话不是"零条"：会种一条欢迎语。所以判据是"没有用户的对话内容"
+    newHasNoChat: (st.convs.filter(c => !c.archived)[0].messages || [])
+      .filter(m => m.role === 'user').length === 0,
+  };
+})()`);
+ok(archived.archived === 1, `有一个会话被归档了（共 ${archived.total} 个）`);
+ok(archived.archivedMsgs >= 2, `归档的会话保住了它的消息（${archived.archivedMsgs} 条）`);
+ok(archived.newHasNoChat && archived.domRows <= 1,
+  `归档后自动开了新的会话，里面没有旧对话（当前画面上 ${archived.domRows} 行）`);
+
+/* 归档只在记忆馆里可见 + 按创建时间排 + 能导出 */
+await evaluate(page, "(() => { document.querySelector('#openMemory').click(); return 1; })()");
+await sleep(300);
+const memView = await evaluate(page, `(() => ({
+  visible: getComputedStyle(document.querySelector('#viewMemory')).display !== 'none',
+  chatHidden: getComputedStyle(document.querySelector('#viewChat')).display === 'none',
+  archiveItems: document.querySelectorAll('#archList .item').length,
+  archiveTitle: (document.querySelector('#archList .item h3') || {}).textContent || '',
+  archiveActs: [...document.querySelectorAll('#archList .item [data-cact]')].map(b => b.getAttribute('data-cact')),
+  sortedByCreated: (() => {
+    const st = JSON.parse(localStorage.getItem('ventana.convs'));
+    const a = st.convs.filter(c => c.archived);
+    for (let i = 1; i < a.length; i++) if (a[i - 1].createdAt < a[i].createdAt) return false;
+    return true;
+  })(),
+}))()`);
+ok(memView.visible && memView.chatHidden, '记忆馆是独立视图，打开时对话页收起');
+ok(memView.archiveItems === 1, `归档列表里有 1 个会话`);
+ok(memView.archiveActs.indexOf('export') >= 0 && memView.archiveActs.indexOf('del') >= 0,
+  `每个归档会话都有导出与删除（${memView.archiveActs.join(',')}）`);
+ok(memView.archiveActs.indexOf('restore') >= 0, '还能取消归档');
+ok(memView.sortedByCreated, '归档会话按创建时间排序');
+
+/* 导出 txt 的内容要能看 */
+const exportText = await evaluate(page, `(() => {
+  // 直接调内部逻辑不方便，这里触发真实下载流程并把 Blob 内容读回来
+  let captured = null;
+  const realCreate = URL.createObjectURL;
+  URL.createObjectURL = function (blob) { captured = blob; return realCreate.call(URL, blob); };
+  document.querySelector('#archList [data-cact=export]').click();
+  URL.createObjectURL = realCreate;
+  return captured ? captured.text() : Promise.resolve('');
+})()`);
+ok(exportText.indexOf('Ventana 会话记录') >= 0, '导出的 txt 有标题');
+ok(exportText.indexOf('这是第一个会话说的话') >= 0, '导出的 txt 里有当初说的话');
+ok(exportText.indexOf('[我]') >= 0 || exportText.indexOf('我') >= 0, '导出的 txt 标出了说话人');
+
+/* 删除归档会话 */
+const hadArchiveItem = await evaluate(page, `document.querySelectorAll('#archList .item').length`);
+ok(hadArchiveItem === 1, `（前提）删除前列表里正好有一个归档会话（${hadArchiveItem}）`);
+await evaluate(page, `(() => {
+  window.confirm = function () { return true; };
+  document.querySelector('#archList [data-cact=del]').click();
+  return 1;
+})()`);
+await sleep(300);
+const afterDelConv = await evaluate(page, `(() => {
+  const st = JSON.parse(localStorage.getItem('ventana.convs'));
+  return { archived: st.convs.filter(c => c.archived).length, items: document.querySelectorAll('#archList .item').length };
+})()`);
+ok(afterDelConv.archived === 0 && afterDelConv.items === 0, '删除归档会话后列表里没有了');
+
+/* ============================================================
+   十五、记忆馆
+   ============================================================ */
+console.log('\n=== 记忆馆 ===');
+await fresh('light');
+
+const memWrite = await evaluate(page, `(() => {
+  localStorage.setItem('ventana.cfg', JSON.stringify({ base: 'https://example.com/v1', key: 'sk', model: 'm' }));
+  localStorage.setItem('ventana.memory', JSON.stringify([
+    { id: 'm1', at: Date.now() - 86400000, title: '她喜欢下雨天', body: '说过三次，雨天会想起小时候。', from: '' },
+    { id: 'm2', at: Date.now(), title: '她要压缩上下文', body: '前面聊了很多世界设定，摘要如下……', from: '' },
+  ]));
+  return 1;
+})()`);
+await goto(page, URL_);
+await sleep(400);
+const badge = await evaluate(page, `(() => ({
+  count: document.querySelector('#memCount').textContent,
+  hidden: document.querySelector('#memCount').hidden,
+  title: document.querySelector('#openMemory').title,
+}))()`);
+ok(!badge.hidden && badge.count === '2', `顶栏记忆馆入口显示条数（${badge.count}）`);
+
+await evaluate(page, "(() => { document.querySelector('#openMemory').click(); return 1; })()");
+await sleep(300);
+const memUi = await evaluate(page, `(() => ({
+  items: document.querySelectorAll('#memList .item').length,
+  titles: [...document.querySelectorAll('#memList .item h3')].map(h => h.firstChild.textContent),
+  hasTime: !!document.querySelector('#memList .item time'),
+  acts: [...document.querySelectorAll('#memList .item [data-mact]')].map(b => b.getAttribute('data-mact')),
+  // 渲染顺序里，时间较新的那条必须排在前面（不硬编码具体标题）
+  newestFirst: (() => {
+    const titles = [...document.querySelectorAll('#memList .item h3')].map(h => h.firstChild.textContent);
+    const byAt = [...JSON.parse(localStorage.getItem('ventana.memory') || '[]')]
+      .sort((a, b) => b.at - a.at).map(m => m.title);
+    return titles.join('|') === byAt.join('|');
+  })(),
+}))()`);
+ok(memUi.items === 2, `记忆馆列出两条（${memUi.titles.join('、')}）`);
+ok(memUi.hasTime, '每条带时间戳');
+ok(memUi.acts.indexOf('del') >= 0 && memUi.acts.indexOf('copy') >= 0,
+  `每条能复制与删除（${memUi.acts.join(',')}）`);
+ok(memUi.newestFirst, '最新的排在最上面');
+
+/* AI 自己写入：走 tools */
+await evaluate(page, "(() => { document.querySelector('#memBack').click(); return 1; })()");
+await sleep(200);
+await evaluate(page, `(() => {
+  window.__sent = [];
+  let n = 0;
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') < 0) return realFetch.apply(this, arguments);
+    window.__sent.push(JSON.parse(init.body));
+    n++;
+    let sse;
+    if (n === 1) {
+      // 参数故意拆成两个分片（真实端点就是这么流的）
+      sse = sseBody([
+        { tool_calls: [{ index: 0, id: 'c1', type: 'function',
+          function: { name: 'save_memory', arguments: '{"title":"记住这' } }] },
+        { tool_calls: [{ index: 0,
+          function: { arguments: '件事","body":"她说明天要早起。"}' } }] },
+      ]);
+    } else {
+      sse = sseBody([{ content: '记住了。' }]);
+    }
+    return Promise.resolve(new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+  };
+  const b = document.querySelector('#box');
+  b.value = '记住这件事：我明天要早起';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+let sawSaved = false;
+for (let i = 0; i < 40; i++) {
+  sawSaved = await evaluate(page, `[...document.querySelectorAll('#log .sysline')].some(s => s.textContent.indexOf('记下了') >= 0)`);
+  if (sawSaved) break;
+  await sleep(150);
+}
+await sleep(300);
+const memArgs = await evaluate(page, `JSON.stringify((window.__sent[1]&&window.__sent[1].messages||[])
+  .filter(m => m.role === 'assistant' && m.tool_calls)
+  .map(m => m.tool_calls[0].function.arguments))`);
+ok(memArgs.indexOf('她说明天要早起') >= 0 && memArgs.indexOf('记住这件事') >= 0,
+  `工具调用参数是合法的 JSON 且内容完整（${String(memArgs).slice(0, 90)}）`);
+const memWrote = await evaluate(page, `(() => ({
+  stored: JSON.parse(localStorage.getItem('ventana.memory')).map(m => m.title),
+  sysLines: [...document.querySelectorAll('#log .sysline')].map(s => s.textContent),
+  badge: document.querySelector('#memCount').textContent,
+  hasAt: JSON.parse(localStorage.getItem('ventana.memory')).every(m => typeof m.at === 'number'),
+}))()`);
+ok(memWrote.stored.indexOf('记住这件事') >= 0,
+  `AI 通过工具写入了一条记忆（${memWrote.stored.join('、')}）`);
+ok(memWrote.sysLines.some(t => t.indexOf('记下了') >= 0),
+  `聊天里出现"记下了"的系统事件（${memWrote.sysLines.join(' / ')}）`);
+ok(memWrote.badge === '3', `顶栏计数跟着涨（${memWrote.badge}）`);
+ok(memWrote.hasAt, '每条记忆都带时间戳');
+
+/* 取记忆：索引在提示词里，正文按需取 */
+const memRead = await evaluate(page, `(() => {
+  window.__sent = [];
+  let n = 0;
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') < 0) return realFetch.apply(this, arguments);
+    window.__sent.push(JSON.parse(init.body));
+    n++;
+    const sse = n === 1
+      ? 'data: ' + JSON.stringify({ choices: [{ delta: { content: '\\n[[忆:她喜欢下雨天]]' } }] }) + '\\n\\ndata: [DONE]\\n\\n'
+      : 'data: ' + JSON.stringify({ choices: [{ delta: { content: '想起来了。' } }] }) + '\\n\\ndata: [DONE]\\n\\n';
+    return Promise.resolve(new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+  };
+  const b = document.querySelector('#box');
+  b.value = '你还记得我喜欢什么吗';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(1200);
+const memReadRes = await evaluate(page, `(() => {
+  const all = window.__sent.map(x => x.messages).flat();
+  return {
+    sysHasIndex: (window.__sent[0].messages[0].content || '').indexOf('她喜欢下雨天') >= 0,
+    sysHasBody: (window.__sent[0].messages[0].content || '').indexOf('雨天会想起小时候') >= 0,
+    echoedBody: all.some(m => String(m.content).indexOf('雨天会想起小时候') >= 0),
+    sysLines: [...document.querySelectorAll('#log .sysline')].map(s => s.textContent),
+  };
+})()`);
+ok(memReadRes.sysHasIndex, '提示词里有记忆的**标题索引**');
+ok(!memReadRes.sysHasBody, '提示词里**没有**记忆正文（所以不烧 token）');
+ok(memReadRes.echoedBody, 'AI 索取后正文才被送进上下文');
+ok(memReadRes.sysLines.some(t => t.indexOf('取了记忆') >= 0), '留下"取了记忆"的系统事件');
+
+/* 旧数据迁移：老用户的 messages 数组要变成第一个会话 */
+await evaluate(page, `(() => {
+  localStorage.clear();
+  localStorage.setItem('ventana.msgs', JSON.stringify([
+    { role: 'user', content: '旧世界的这句话', at: Date.now() - 60000 },
+    { role: 'assistant', content: '记着。', at: Date.now() - 59000 },
+  ]));
+  return 1;
+})()`);
+await goto(page, URL_);
+await sleep(400);
+const migrated2 = await evaluate(page, `(() => {
+  const st = JSON.parse(localStorage.getItem('ventana.convs') || 'null');
+  return {
+    hasConvs: !!st && Array.isArray(st.convs),
+    msgCount: st ? st.convs[0].messages.length : -1,
+    domRows: document.querySelectorAll('#log .row:not(.sys)').length,
+    hasMenus: document.querySelectorAll('#log .act').length,
+  };
+})()`);
+ok(migrated2.hasConvs && migrated2.msgCount === 2,
+  `旧的 messages 数组迁移成了会话（${migrated2.msgCount} 条消息）`);
+ok(migrated2.domRows === 2, `迁移后的聊天记录照常显示（${migrated2.domRows} 行）`);
+ok(migrated2.hasMenus >= 5,
+  `迁移出来的消息也带菜单（${migrated2.hasMenus} 个按钮 / 2 条消息）`);
 
 console.log(`\n结果：${pass} 项通过，${fail} 项失败`);
 console.log(`截图：${OUT}/mobile-light.png, mobile-dark.png`);

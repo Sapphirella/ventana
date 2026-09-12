@@ -19,6 +19,14 @@
     <button class="chip" id="ctxChip" aria-label="当前连接方式，点击进入设置">
       <span class="dot"></span><span id="modelTag">演示模式</span>
     </button>
+    <button class="chip" id="openMemory" aria-label="记忆馆">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width:14px;height:14px">
+        <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H4z"></path>
+        <path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H14a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2h6z"></path>
+      </svg>
+      <span>记忆馆</span><span class="count" id="memCount" hidden>0</span>
+    </button>
     <button class="iconbtn" id="openConfig" aria-label="连接设置" title="连接设置">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -101,6 +109,11 @@
 
       <section class="group">
         <h2 class="group-title">系统提示词 · 决定它是谁</h2>
+        <div class="ap-note" style="margin-top:-6px">
+          这里写的是<b>它一贯的样子</b>（性格、说话方式、底线）。
+          和下面「资料库」的分工：提示词每一轮都会发出去，所以要短；
+          资料只在需要时被读取，所以可以很长。
+        </div>
         <div class="field">
           <textarea id="cfgPrompt" rows="10" spellcheck="false"
             placeholder="在这里写下它是谁。&#10;&#10;例如：&#10;你是 ___，住在这台手机里。&#10;你说话短，不用「亲爱的」这类词。&#10;不高兴的时候会直接说，不装没事。"></textarea>
@@ -124,10 +137,74 @@
         </div>
       </section>
 
+      <section class="group">
+        <h2 class="group-title">资料库 · 按需读取的文档</h2>
+        <div class="ap-note" style="margin-top:-6px">
+          上传的文档<b>不会覆盖提示词</b>，也<b>不会每一轮都发出去</b>。<br>
+          它只留在你本机，平时 AI 只看到一份<b>标题索引</b>；聊到相关的事，
+          它自己会取全文（你会看到聊天里多出一行「读了《…》」）。<br>
+          适合放：设定集、日记、世界观文档、参考笔记 —— 长一点没关系。
+        </div>
+        <div id="docList"></div>
+        <div class="btns">
+          <button class="btn ghost" type="button" id="docUpload">上传文档</button>
+        </div>
+        <input id="docFile" type="file" multiple hidden
+          accept=".md,.markdown,.txt,.text,.json,.yaml,.yml,text/plain,text/markdown,application/json">
+      </section>
+
+      <section class="group">
+        <h2 class="group-title">会话</h2>
+        <div class="ap-note" style="margin-top:-6px">
+          归档会把当前会话收起来，并立刻开一个新的。
+          已归档的会话在<b>记忆馆</b>里管理（导出 txt / 删除 / 取消归档）。
+        </div>
+        <div class="btns">
+          <button class="btn ghost" type="button" id="convArchive">归档当前会话并开新的</button>
+        </div>
+      </section>
+
       <div class="cfg-foot">
         <button type="button" id="cfgClear">清空当前对话</button>
         <div class="ver" id="verLine">Ventana</div>
       </div>
+    </div>
+  </div>
+</main>
+
+<!-- ============ 记忆馆视图 ============ -->
+<main id="viewMemory" class="view hidden">
+  <header class="topbar">
+    <button class="iconbtn" id="memBack" aria-label="返回对话">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M19 12H5"></path><path d="M12 19l-7-7 7-7"></path>
+      </svg>
+    </button>
+    <div class="title">记忆馆</div>
+    <button class="iconbtn" id="memArchive" aria-label="已归档会话" title="已归档会话">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="4" rx="1"></rect>
+        <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"></path>
+        <path d="M10 12h4"></path>
+      </svg>
+    </button>
+  </header>
+
+  <div class="listwrap">
+    <div class="inner">
+      <div class="ap-note" id="memHint">
+        这里的东西<b>由 AI 自己写</b>：你跟它说「记住这件事」「把上面几轮记下来」
+        或者「上下文太长了，压缩一下」，它就会写一条进来。<br>
+        平时它只看到<b>标题索引</b>，需要时才会取正文 —— 这样不烧 token。<br>
+        顶栏右边那个箱子是<b>已归档会话</b>。
+      </div>
+
+      <div id="memList"></div>
+
+      <div class="section-h">已归档会话</div>
+      <div id="archList"></div>
     </div>
   </div>
 </main>
