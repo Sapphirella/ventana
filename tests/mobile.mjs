@@ -268,10 +268,16 @@ const thinking = await evaluate(page, "(() => !!document.querySelector('#typing.
 ok(thinking, '发送后先出现「正在输入」指示器（在输入卡上方，不占气泡）');
 /* 别在这里断言"那一刻没有空气泡"：气泡是**等到第一个字才建**的，
    而"建好"和"画上字"之间隔着一次合帧（paintSoon），快速节奏下这个缝隙极短但存在。
-   真正该守的是不变量的**最终**形态：整轮结束后不留空气泡。 */
-const noEmptyAtEnd = await evaluate(page, `(() => {
-  const rows = [...document.querySelectorAll('#log .reply')];
-  return rows.every(el => (el.textContent || '').trim().length > 0);
+   真正该守的是不变量的**最终**形态：整轮结束后不留空气泡。
+   所以要轮询等渲染落定（最多 3 秒），再断言所有回复气泡都有字。 */
+const noEmptyAtEnd = await evaluate(page, `(async () => {
+  const t0 = Date.now();
+  for (;;) {
+    const rows = [...document.querySelectorAll('#log .reply')];
+    if (rows.length && rows.every(el => (el.textContent || '').trim().length > 0)) return true;
+    if (Date.now() - t0 > 3000) return false;
+    await new Promise(r => setTimeout(r, 50));
+  }
 })()`);
 ok(noEmptyAtEnd, '整轮结束后聊天区里没有留下空气泡');
 
@@ -1811,8 +1817,18 @@ ok(badge.newHidden, '预置记忆（非新写入）不亮感叹号');
 
 await evaluate(page, "(() => { document.querySelector('#openMemory').click(); return 1; })()");
 await sleep(300);
-const memTotalUi = await evaluate(page, "(() => { const t = document.querySelector('#memTotal'); return t ? t.textContent : null; })()");
-ok(memTotalUi === '共 2 条记忆', `记忆馆内显示总数（${memTotalUi}）`);
+const memTotalUi = await evaluate(page, `(() => {
+  const t = document.querySelector('#memTotal');
+  const cs = t ? getComputedStyle(t) : null;
+  return {
+    text: t ? t.textContent : null,
+    size: cs ? cs.fontSize : null,
+    top: cs ? cs.marginTop : null,
+  };
+})()`);
+ok(memTotalUi.text === '共 2 条记忆', `记忆馆内显示总数（${memTotalUi.text}）`);
+ok(memTotalUi.size === '14px', `总数行字号加大两个字号（${memTotalUi.size}）`);
+ok(parseFloat(memTotalUi.top) >= 12, `总数行与上方提示词拉开间距（margin-top ${memTotalUi.top}）`);
 
 await evaluate(page, "(() => { document.querySelector('#memBack').click(); return 1; })()");
 await sleep(200);
@@ -2100,6 +2116,70 @@ const snipRes = await evaluate(page, `(() => {
 ok(snipRes.indexFirst, '平时第一轮 system 里文档只给索引（不整篇带）');
 ok(snipRes.found && snipRes.tailOut, '按需截取包含目标相关内容、不含尾部无关内容');
 ok(snipRes.len >= 3000 && snipRes.len <= 6500, `按需截取：文档 ${snipRes.docLen} 字只给相关部分（实际 ${snipRes.len} 字，≤6000 上限）`);
+
+/* 原生工具调用 · 两万字大文档：read_doc 也必须按需截取，绝不整篇给 */
+const doc20k = fill('甲', 3000) + '\n\n'
+  + '鲸鱼的核心：鲸鱼用肺呼吸、喂奶给幼崽，是温血的海洋哺乳动物。'.repeat(80) + '\n\n'
+  + fill('乙', 5000) + '\n\n' + fill('丙', 6000) + '\n\n' + fill('丁', 4000) + '\n\n'
+  + '长颈鹿尾巴卷曲，这一句放在文档末尾作为独有标志。'.repeat(10);
+ok(doc20k.length > 20000, `工具路径用例文档超过 2 万字（${doc20k.length}）`);
+await evaluate(page, `(() => {
+  localStorage.setItem('ventana.docs', JSON.stringify([
+    { id: 'big2', name: '海洋生物图鉴', text: ${JSON.stringify(doc20k)}, at: Date.now() },
+  ]));
+  localStorage.setItem('ventana.sync', JSON.stringify({ prompt: false, docs: false }));
+  return 1;
+})()`);
+await goto(page, URL_);
+await sleep(400);
+await evaluate(page, `(() => {
+  window.__sent = [];
+  let n = 0;
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') < 0) return realFetch.apply(this, arguments);
+    window.__sent.push(JSON.parse(init.body));
+    n++;
+    const sse = n === 1
+      ? sseBody([
+          { tool_calls: [{ index: 0, id: 'call_x', type: 'function',
+            function: { name: 'read_doc', arguments: '{"na' } }] },
+          { tool_calls: [{ index: 0,
+            function: { arguments: 'me":"海洋生物图鉴"}' } }] },
+        ])
+      : sseBody([{ content: '好，我看完了相关段落。' }]);
+    return Promise.resolve(new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+  };
+  const b = document.querySelector('#box');
+  b.value = '鲸鱼平时吃什么？';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(450);
+const toolSnip = await evaluate(page, `(() => {
+  const all = window.__sent.map(x => x.messages).flat();
+  const tool = all.filter(m => m.role === 'tool')[0] || {};
+  const t = String(tool.content || '');
+  return {
+    hasTool: all.some(m => m.role === 'tool'),
+    marked: t.indexOf('按需截取') >= 0,
+    found: t.indexOf('鲸鱼') >= 0,
+    tailOut: t.indexOf('长颈鹿尾巴卷曲') < 0,
+    len: t.length,
+    docLen: ${JSON.stringify(doc20k.length)},
+    sysLines: [...document.querySelectorAll('#log .sysline')].map(s => s.textContent),
+  };
+})()`);
+ok(toolSnip.hasTool, '工具调用路径照常产生 role=tool 结果');
+ok(toolSnip.found && toolSnip.tailOut && toolSnip.marked,
+  '工具调用路径：2 万字文档只给与话题相关段落、无尾部内容、带按需截取说明');
+ok(toolSnip.len <= 6500, `工具调用路径：绝不整篇输出（实际给 ${toolSnip.len} 字 / 文档 ${toolSnip.docLen} 字）`);
+ok(toolSnip.sysLines.some(t => /读了《海洋生物图鉴》· \d+\/\d+ 字（按需截取）/.test(t)),
+  `系统事件如实显示按需截取（${toolSnip.sysLines.filter(t => t.indexOf('海洋生物图鉴') >= 0).join(' / ')}）`);
+ok(toolSnip.sysLines.every(t => t.indexOf('海洋生物图鉴') < 0 || !/（\d{4,} 字）$/.test(t)),
+  '系统事件不再显示"读了整篇 2 万字"的总字数误导');
 
 /* 旧数据迁移：老用户的 messages 数组要变成第一个会话 */
 await evaluate(page, `(() => {

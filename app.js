@@ -1,4 +1,4 @@
-  var VERSION = 'v0.14';
+  var VERSION = 'v0.15';
   var $ = function (s) { return document.querySelector(s); };
   var logEl = $('#log'), box = $('#box'), sendBtn = $('#send');
 
@@ -188,9 +188,11 @@
     });
     return out;
   }
+  /** 按需截取：返回 { text, matched }。matched=false 表示没找到与话题相关的段落，
+      text 是开头部分（调用方据此如实向模型说明）。 */
   function docSnippet(doc) {
     var text = doc.text || '';
-    if (text.length <= DOC_SNIPPET_MAX) return text;
+    if (text.length <= DOC_SNIPPET_MAX) return { text: text, matched: true };
     var ctx = msgs().filter(function (m) { return m.role === 'user' && m.content; })
       .slice(-2).map(function (m) { return m.content; }).join(' ');
     var target = docBigrams(ctx + ' ' + (doc.name || ''));
@@ -202,7 +204,7 @@
       for (var k = 0; k < targetKeys.length; k++) if (bg[targetKeys[k]]) hit++;
       if (!best || hit > best.hit) best = { i: i, len: b.text.length, hit: hit };
     });
-    if (!best || !best.hit) return text.slice(0, DOC_SNIPPET_MAX);
+    if (!best || !best.hit) return { text: text.slice(0, DOC_SNIPPET_MAX), matched: false };
     /* 以命中块为中心，向两侧扩展一个**连续区间**（保持文档连贯）。
        每次取较短的一侧吃；较短侧都装不下时，另一侧必然更装不下，即停。 */
     var lo = best.i, hi = best.i, total = best.len;
@@ -218,7 +220,8 @@
       total += addLen;
       if (takeBack) lo--; else hi++;
     }
-    return blocks.slice(lo, hi + 1).map(function (b) { return b.text; }).join('\n\n');
+    return { text: blocks.slice(lo, hi + 1).map(function (b) { return b.text; }).join('\n\n'),
+             matched: true };
   }
 
   /* ============================================================
@@ -824,7 +827,9 @@
       type: 'function',
       function: {
         name: 'read_doc',
-        description: '读取一份已上传资料的全文。只在确实需要里面的内容时调用；'
+        description: '读取一份已上传资料里与当前话题最相关的内容。'
+          + '长文档会按需截取：一次最多给 ' + DOC_SNIPPET_MAX + ' 字，'
+          + '不会整篇输出，读不完整是正常的。只在确实需要里面的具体内容时调用；'
           + '不要为了"了解一下"而调用，也不要一次调用多个。',
         parameters: {
           type: 'object',
@@ -976,11 +981,16 @@
         return '资料库里没有叫《' + String(arg).trim() + '》的文档。现有：'
           + (docs.map(function (d) { return d.name; }).join('、') || '（空的）');
       }
-      addSystem('读了《' + doc.name + '》（' + doc.text.length + ' 字）');
       if (doc.text.length > DOC_SNIPPET_MAX) {
-        return '《' + doc.name + '》共 ' + doc.text.length + ' 字，以下是与当前话题最相关'
-          + '的部分（最多 ' + DOC_SNIPPET_MAX + ' 字，按需截取）：\n\n' + docSnippet(doc);
+        var res = docSnippet(doc);
+        addSystem('读了《' + doc.name + '》· ' + res.text.length + '/' + doc.text.length + ' 字（按需截取）');
+        var head = res.matched
+          ? '以下是与当前话题最相关的部分'
+          : '没找到与当前话题直接相关的部分，以下先给开头部分';
+        return '《' + doc.name + '》共 ' + doc.text.length + ' 字，' + head
+          + '（最多 ' + DOC_SNIPPET_MAX + ' 字，按需截取，不会整篇输出）：\n\n' + res.text;
       }
+      addSystem('读了《' + doc.name + '》（' + doc.text.length + ' 字）');
       return '《' + doc.name + '》全文：\n\n' + doc.text;
     }
     if (kind === '忆') {
