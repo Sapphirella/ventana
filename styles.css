@@ -304,6 +304,32 @@
   .drawer .listwrap { flex: 1; padding: 4px 16px calc(20px + env(safe-area-inset-bottom)); }
   .drawer .empty-note { padding: 26px 8px; }
 
+  /* ---------- 导出面板 ----------
+     内置 WebView（微信等）里 a[download] 不可靠：点击后把 blob 当导航打开、
+     跳转出去必白屏。此面板把导出全文直接摊在页面里，复制即可拿走，不跳浏览器。 */
+  .export-body {
+    flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px;
+    padding: 14px 16px calc(20px + env(safe-area-inset-bottom));
+  }
+  .export-note {
+    flex: none; font-size: 12.5px; line-height: 1.7; color: var(--text-2);
+  }
+  #exportBody {
+    flex: 1; min-height: 0; width: 100%; resize: none; outline: 0;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: var(--bg-2); color: var(--text);
+    font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: 10px 12px; white-space: pre; overflow: auto;
+    -webkit-user-select: text; user-select: text;
+  }
+  #exportCopy {
+    flex: none; height: 46px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15.5px; font-weight: 600;
+    background: var(--accent-bg); color: var(--accent-fg);
+  }
+  #exportCopy:active { opacity: .8; }
+
   /* 回到底部：翻了历史才浮出来，不硬拽视口 */
   #toBottom {
     position: fixed; right: 16px; z-index: 6;

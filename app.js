@@ -1,4 +1,4 @@
-  var VERSION = 'v0.12';
+  var VERSION = 'v0.13';
   var $ = function (s) { return document.querySelector(s); };
   var logEl = $('#log'), box = $('#box'), sendBtn = $('#send');
 
@@ -1277,7 +1277,7 @@
     // 顶栏导出：把「当前会话」整个倒成 txt（和归档抽屉里那个导出用同一套生成器）
     if (!current || !msgs().length) { toast('这个会话还是空的，没有可导出的内容'); return; }
     var ok = download(safeName(convTitle(current)) + '.txt', convToText(current), 'text/plain');
-    toast(ok ? '已导出当前会话为 txt' : '导出失败，浏览器不允许下载');
+    toast(ok ? (isEmbeddedWebView() ? '已打开导出面板，点按钮复制全文' : '已导出当前会话为 txt') : '导出失败，浏览器不允许下载');
   });
   ctxChip.addEventListener('click', openConfig);
   $('#backChat').addEventListener('click', function () {
@@ -1471,7 +1471,7 @@
 
   /* 在设置页按 Ctrl/⌘ + S 保存（人格和 API 一起），手机上不适用但桌面顺手 */
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') { closeArchiveDrawer(); return; }
+    if (e.key === 'Escape') { closeArchiveDrawer(); closeExportSheet(); return; }
     if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
       if ($('#viewConfig').classList.contains('hidden')) return;
       e.preventDefault();
@@ -1717,8 +1717,26 @@
     });
     return lines.join('\n');
   }
+  /* 下载/导出分叉：
+     系统浏览器（支持 a[download] 语义）走原来的 Blob 下载；
+     内置 WebView（微信/企业微信/钉钉/支付宝等）里 a[download] 不可靠——
+     点击会把 blob: URL 当导航打开，跳转出去后 blob 已失效，页面必然是白屏，
+     所以改成把导出全文摊在页面内的导出面板里，让用户复制/长按保存，不跳浏览器。 */
+  function isEmbeddedWebView() {
+    var ua = (navigator.userAgent || '').toLowerCase();
+    // 国产内置浏览器的典型标识：a[download] 大多不支持或点击即导航
+    if (/(micromessenger|wxwork|dingtalk|alipayclient|baiduboxapp)/i.test(ua)) return true;
+    // 能力兜底：根本没有 download 语义的，一律走面板
+    var a = document.createElement('a');
+    if (!('download' in a)) return true;
+    return false;
+  }
   function download(filename, text, mime) {
     try {
+      if (isEmbeddedWebView()) {
+        openExportSheet(text);
+        return true;
+      }
       var blob = new Blob([text], { type: (mime || 'text/plain') + ';charset=utf-8' });
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
@@ -1802,6 +1820,32 @@
   if (archMask) archMask.addEventListener('click', closeArchiveDrawer);
   if (archClose) archClose.addEventListener('click', closeArchiveDrawer);
 
+  /* 导出面板：内置 WebView 里展示导出全文（只读 + 复制），不跳浏览器 */
+  var exportSheet = $('#exportSheet'), exportMask = $('#exportMask'),
+      exportClose = $('#exportClose'), exportBody = $('#exportBody'),
+      exportCopy = $('#exportCopy');
+  var exportText = '';
+  function openExportSheet(text) {
+    if (!exportSheet) return false;
+    exportText = text;
+    exportBody.value = text;
+    exportSheet.classList.add('open');
+    exportSheet.setAttribute('aria-hidden', 'false');
+    return true;
+  }
+  function closeExportSheet() {
+    if (!exportSheet) return;
+    exportSheet.classList.remove('open');
+    exportSheet.setAttribute('aria-hidden', 'true');
+  }
+  if (exportMask) exportMask.addEventListener('click', closeExportSheet);
+  if (exportClose) exportClose.addEventListener('click', closeExportSheet);
+  if (exportCopy) exportCopy.addEventListener('click', function () {
+    copyText(exportText).then(function (ok) {
+      toast(ok ? '已复制全文，去粘贴保存吧' : '没复制成，请长按文本框手动全选再复制');
+    });
+  });
+
   archListEl.addEventListener('click', function (ev) {
     var btn = ev.target.closest ? ev.target.closest('[data-cact]') : null;
     if (!btn) return;
@@ -1812,7 +1856,7 @@
     var act = btn.getAttribute('data-cact');
     if (act === 'export') {
       var ok = download(safeName(convTitle(c)) + '.txt', convToText(c), 'text/plain');
-      toast(ok ? '已导出 txt' : '这台设备不允许下载');
+      toast(ok ? (isEmbeddedWebView() ? '已打开导出面板，点按钮复制全文' : '已导出 txt') : '这台设备不允许下载');
     } else if (act === 'rename') {
       var name = prompt('给这个会话起个名字', convTitle(c));
       if (name !== null) { c.title = String(name).trim().slice(0, 40); saveStore(); renderArchives(); }

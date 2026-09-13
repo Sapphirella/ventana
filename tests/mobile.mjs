@@ -1594,6 +1594,73 @@ ok(topExportInfo.text.indexOf('顶栏导出这句话必须出现在 txt 里') >=
 ok(topExportInfo.text.indexOf('我') >= 0, '顶栏导出的 txt 标出了说话人');
 
 /* ============================================================
+    顶栏导出 · 内置 WebView（微信）环境：
+    a[download] 不可靠，点导出不能再走 blob 跳转（跳出去必白屏），
+    必须改成打开页面内导出面板，把全文摊出来让用户复制。
+   ============================================================ */
+console.log('\n=== 内置 WebView 导出面板 ===');
+await fresh('light');
+// 注入微信 UA —— 覆盖后要重新加载一次才生效
+await page.send('Emulation.setUserAgentOverride', {
+  userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.49(0x1800312b) NetType/WIFI Language/zh_CN',
+  platform: 'iPhone',
+});
+await goto(page, URL_);
+await sleep(400);
+await sendText('内置浏览器导出的这句话也要在');
+await sleep(380);
+await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
+await sleep(300);
+
+const wxExportInfo = await evaluate(page, `(async () => {
+  let captured = null, fileName = '';
+  const realCreate = URL.createObjectURL;
+  URL.createObjectURL = function (blob) { captured = blob; return realCreate.call(URL, blob); };
+  const stopDownload = (e) => {
+    const t = e.target;
+    if (t && t.tagName === 'A' && t.hasAttribute('download')) {
+      fileName = t.getAttribute('download') || '';
+      e.preventDefault();
+    }
+  };
+  document.addEventListener('click', stopDownload, true);
+  document.querySelector('#exportChat').click();
+  document.removeEventListener('click', stopDownload, true);
+  URL.createObjectURL = realCreate;
+  const sheet = document.querySelector('#exportSheet');
+  const body = document.querySelector('#exportBody');
+  return {
+    captured, fileName,
+    opened: sheet.classList.contains('open'),
+    bodyText: body.value,
+    copyBtn: !!document.querySelector('#exportCopy'),
+    userAgent: navigator.userAgent,
+  };
+})()`);
+ok(wxExportInfo.userAgent.indexOf('MicroMessenger') >= 0, '（前提）页面跑在微信 UA 下');
+ok(!wxExportInfo.captured && !wxExportInfo.fileName,
+  '内置 WebView 里不再走 blob + a[download]（跳出去必白屏）');
+ok(wxExportInfo.opened, '点导出打开页面内导出面板，不再跳浏览器');
+ok(wxExportInfo.bodyText.indexOf('Ventana 会话记录') >= 0, '导出面板里有会话标题');
+ok(wxExportInfo.bodyText.indexOf('内置浏览器导出的这句话也要在') >= 0, '导出面板里有当前会话的话');
+ok(wxExportInfo.copyBtn, '导出面板有一键复制按钮');
+
+/* 复制按钮有反馈（成功或失败都会有 toast） */
+await evaluate(page, "(() => { document.querySelector('#exportCopy').click(); return 1; })()");
+await sleep(250);
+const wxCopyToast = await evaluate(page, "(() => (document.querySelector('#toast') || {}).textContent || '')()");
+ok(wxCopyToast.length > 0, `点复制有反馈（${wxCopyToast.slice(0, 20)}…）`);
+
+/* 关闭面板 */
+await evaluate(page, "(() => { document.querySelector('#exportClose').click(); return 1; })()");
+await sleep(200);
+const wxSheetClosed = await evaluate(page, "(() => !document.querySelector('#exportSheet').classList.contains('open'))()");
+ok(wxSheetClosed, '关闭按钮能收起导出面板');
+
+/* 恢复回 iPhone 系统浏览器 UA，别污染后面的测试 */
+await emulateMobile(page, { width: 390, height: 844, dpr: 3 });
+
+/* ============================================================
    十四、会话归档
    ============================================================ */
 console.log('\n=== 会话归档 ===');
