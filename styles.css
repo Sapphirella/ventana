@@ -274,6 +274,36 @@
   }
   .section-h:first-child { margin-top: 0; }
 
+  /* ---------- 已归档会话抽屉 ----------
+     从记忆馆顶栏的箱子弹出，右侧滑入；不占记忆馆主体的空间。 */
+  .drawer-wrap {
+    position: fixed; inset: 0; z-index: 40;
+    visibility: hidden;
+  }
+  .drawer-wrap.open { visibility: visible; }
+  .drawer-mask {
+    position: absolute; inset: 0; background: rgba(0,0,0,.42);
+    opacity: 0; transition: opacity .22s ease;
+  }
+  .drawer-wrap.open .drawer-mask { opacity: 1; }
+  .drawer {
+    position: absolute; top: 0; right: 0; bottom: 0;
+    width: min(84vw, 360px); max-width: 100%;
+    background: var(--bg); border-left: 1px solid var(--line);
+    box-shadow: -8px 0 28px rgba(0,0,0,.18);
+    display: flex; flex-direction: column;
+    transform: translateX(102%); transition: transform .26s ease;
+  }
+  .drawer-wrap.open .drawer { transform: translateX(0); }
+  .drawer-head {
+    flex: none; display: flex; align-items: center; gap: 10px;
+    padding: calc(env(safe-area-inset-top) + 10px) 14px 10px;
+    border-bottom: 1px solid var(--line); min-height: 56px;
+  }
+  .drawer-head .title { font-size: 17px; font-weight: 700; flex: 1; text-align: center; }
+  .drawer .listwrap { flex: 1; padding: 4px 16px calc(20px + env(safe-area-inset-bottom)); }
+  .drawer .empty-note { padding: 26px 8px; }
+
   /* 回到底部：翻了历史才浮出来，不硬拽视口 */
   #toBottom {
     position: fixed; right: 16px; z-index: 6;
@@ -412,6 +442,19 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .docinfo span { display: block; font-size: 11.5px; color: var(--text-2); margin-top: 2px; }
+  /* 资料库列表项的删除按钮：图标化，不再是一行突兀的文字。
+     与聊天里那排小图标同一套规格（36×36 触摸目标、次要色、按下变红）。 */
+  .doc-del {
+    flex: none; width: 36px; height: 36px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-2); transition: background .15s ease, color .15s ease, opacity .15s ease;
+  }
+  .doc-del svg { width: 16px; height: 16px; }
+  .doc-del:active { background: var(--bg); color: var(--err); }
+  @media (hover: hover) {
+    .doc-del { opacity: .55; }
+    .doc-del:hover { opacity: 1; }
+  }
 
   /* ---------- toast ---------- */
   #toast {
@@ -428,6 +471,7 @@
     .caret { animation: none; }
     .thinking i { animation: none; opacity: .6; }
     #toBottom, #toast { transition: none; }
+    .drawer-wrap, .drawer-mask, .drawer { transition: none; }
   }
 
   /* 桌面/平板（≥720px）：消息区限宽居中，输入卡不再贴边 */

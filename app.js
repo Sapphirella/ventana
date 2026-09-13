@@ -1,4 +1,4 @@
-  var VERSION = 'v0.8';
+  var VERSION = 'v0.9';
   var $ = function (s) { return document.querySelector(s); };
   var logEl = $('#log'), box = $('#box'), sendBtn = $('#send');
 
@@ -1265,9 +1265,8 @@
   $('#openMemory').addEventListener('click', openMemory);
   $('#memBack').addEventListener('click', function () { showView('chat'); scrollLog(); });
   $('#memArchive').addEventListener('click', function () {
-    // 顶栏那个箱子：滚到归档区，方便一键找到
-    var h = document.querySelector('#archList');
-    if (h && h.scrollIntoView) h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // 顶栏那个箱子：从右侧弹出已归档会话抽屉（不再滚到记忆馆主体里的列表）
+    openArchiveDrawer();
   });
   $('#convArchive').addEventListener('click', function () {
     archiveCurrent();
@@ -1428,6 +1427,7 @@
 
   /* 在设置页按 Ctrl/⌘ + S 保存（人格和 API 一起），手机上不适用但桌面顺手 */
   document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { closeArchiveDrawer(); return; }
     if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
       if ($('#viewConfig').classList.contains('hidden')) return;
       e.preventDefault();
@@ -1698,6 +1698,7 @@
     welcome();
     scrollLog();
     renderMemory();
+    renderArchives();
     toast('已归档，开了一个新会话');
   }
 
@@ -1739,6 +1740,23 @@
       archListEl.appendChild(el);
     });
   }
+
+  /* 抽屉：从记忆馆顶栏的箱子弹出，右侧滑入。
+     打开时先重画列表，保证看到的是最新归档；关闭只收抽屉，不影响记忆馆主体。 */
+  var archDrawer = $('#archDrawer'), archMask = $('#archMask'), archClose = $('#archClose');
+  function openArchiveDrawer() {
+    renderArchives();
+    if (!archDrawer) return;
+    archDrawer.classList.add('open');
+    archDrawer.setAttribute('aria-hidden', 'false');
+  }
+  function closeArchiveDrawer() {
+    if (!archDrawer) return;
+    archDrawer.classList.remove('open');
+    archDrawer.setAttribute('aria-hidden', 'true');
+  }
+  if (archMask) archMask.addEventListener('click', closeArchiveDrawer);
+  if (archClose) archClose.addEventListener('click', closeArchiveDrawer);
 
   archListEl.addEventListener('click', function (ev) {
     var btn = ev.target.closest ? ev.target.closest('[data-cact]') : null;
@@ -1817,9 +1835,15 @@
       s.textContent = d.text.length + ' 字 · ' + fmtDay(d.at) + ' · 需要时才读';
       info.appendChild(n); info.appendChild(s);
       var del = document.createElement('button');
-      del.type = 'button'; del.className = 'act danger';
+      del.type = 'button'; del.className = 'doc-del';
       del.setAttribute('data-dact', 'del');
-      del.textContent = '删除';
+      del.setAttribute('aria-label', '删除这份文档');
+      del.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+        + 'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<path d="M3 6h18"></path>'
+        + '<path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"></path>'
+        + '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>'
+        + '<path d="M10 11v6"></path><path d="M14 11v6"></path></svg>';
       el.appendChild(info); el.appendChild(del);
       wrap.appendChild(el);
     });

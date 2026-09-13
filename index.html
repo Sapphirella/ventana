@@ -198,14 +198,33 @@
         这里的东西<b>由 AI 自己写</b>：你跟它说「记住这件事」「把上面几轮记下来」
         或者「上下文太长了，压缩一下」，它就会写一条进来。<br>
         平时它只看到<b>标题索引</b>，需要时才会取正文 —— 这样不烧 token。<br>
-        顶栏右边那个箱子是<b>已归档会话</b>。
+        顶栏右边那个箱子是<b>已归档会话</b>，点一下从旁边滑出来。
       </div>
 
       <div id="memList"></div>
-
-      <div class="section-h">已归档会话</div>
-      <div id="archList"></div>
     </div>
+  </div>
+
+  <!-- 已归档会话抽屉：从记忆馆顶栏的箱子弹出，不占记忆馆主体的空间 -->
+  <div class="drawer-wrap" id="archDrawer" aria-hidden="true">
+    <div class="drawer-mask" id="archMask"></div>
+    <aside class="drawer" role="dialog" aria-label="已归档会话">
+      <header class="drawer-head">
+        <span class="spacer"></span>
+        <div class="title">已归档会话</div>
+        <button class="iconbtn" id="archClose" aria-label="关闭已归档会话列表" title="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M18 6L6 18"></path><path d="M6 6l12 12"></path>
+          </svg>
+        </button>
+      </header>
+      <div class="listwrap">
+        <div class="inner">
+          <div id="archList"></div>
+        </div>
+      </div>
+    </aside>
   </div>
 </main>
 
