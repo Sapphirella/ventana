@@ -1048,6 +1048,101 @@ await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.
 await sleep(300);
 
 /* ============================================================
+   十一、开场白：永远留着，但跟着连接状态换文本
+   ============================================================
+   作者要求：开场白接上 API 之后也要保留（那段排版是"高级感"的来源）。
+   但它的文案里写着"现在还是演示模式…点右上角那枚齿轮"，
+   所以连接状态一变就得把已存的那条**重新写一遍**，否则接上模型后
+   屏幕上还挂着"现在还是演示模式"，看起来像没生效。 */
+console.log('\n=== 开场白 ===');
+await fresh('light');
+
+const greetDemo = await evaluate(page, `(() => {
+  const t = document.querySelector('#log .reply');
+  return {
+    text: t.innerText,
+    hasHello: !!t.querySelector('.hello'),
+    icons: document.querySelectorAll('#log .row .acts').length,
+  };
+})()`);
+ok(greetDemo.text.indexOf('小窗口') >= 0, '演示模式的开场白用作者给的原文（…一个小窗口）');
+ok(greetDemo.text.indexOf('演示模式') >= 0, '演示模式下说明现在是演示模式');
+ok(greetDemo.hasHello, '带「Ventana」那个大标题');
+ok(greetDemo.icons === 0, `开场白下面没有操作图标（${greetDemo.icons} 个）`);
+
+/* 接上 API：开场白要跟着换成"已连接"版，且**不刷新页面** */
+await evaluate(page, `(() => {
+  document.querySelector('#openConfig').click();
+  const set = (id, v) => { document.querySelector(id).value = v; };
+  set('#cfgBase', 'https://example.com/v1'); set('#cfgKey', 'sk'); set('#cfgModel', 'm');
+  document.querySelector('#cfgSave').click();
+  document.querySelector('#backChat').click();
+  return 1;
+})()`);
+await sleep(400);
+const greetApi = await evaluate(page, `(() => {
+  const t = document.querySelector('#log .reply');
+  return { text: t.innerText, hasHello: !!t.querySelector('.hello'),
+           icons: document.querySelectorAll('#log .row .acts').length };
+})()`);
+ok(greetApi.text.indexOf('已经接上模型') >= 0, '接上 API 后开场白换成已连接版（不用刷新）');
+ok(greetApi.text.indexOf('演示模式') < 0, '已连接版里不再提"演示模式"');
+ok(greetApi.hasHello && greetApi.icons === 0, '换了文案仍然保留大标题、仍然没有图标');
+
+/* 清除连接：换回演示版 */
+await evaluate(page, `(() => {
+  document.querySelector('#openConfig').click();
+  document.querySelector('#cfgForget').click();
+  document.querySelector('#backChat').click();
+  return 1;
+})()`);
+await sleep(400);
+const greetBack = await evaluate(page, `document.querySelector('#log .reply').innerText`);
+ok(greetBack.indexOf('演示模式') >= 0, '清除连接后开场白换回演示版');
+
+/* 开场白不进模型历史（它只是引导文案，占 token 还会误导模型） */
+const greetHistory = await evaluate(page, `(() => {
+  window.__sent = [];
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') >= 0) {
+      window.__sent.push(JSON.parse(init.body));
+      return Promise.resolve(new Response(sseBody([{ content: '嗯' }]),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+    }
+    return realFetch.apply(this, arguments);
+  };
+  localStorage.setItem('ventana.cfg', JSON.stringify({ base: 'https://example.com/v1', key: 'sk', model: 'm' }));
+  return 1;
+})()`);
+await goto(page, URL_);
+await sleep(400);
+await evaluate(page, `(() => {
+  window.__sent = [];
+  const realFetch = window.fetch;
+  ${SSE_FN}
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') >= 0) {
+      window.__sent.push(JSON.parse(init.body));
+      return Promise.resolve(new Response(sseBody([{ content: '嗯' }]),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+    }
+    return realFetch.apply(this, arguments);
+  };
+  const b = document.querySelector('#box');
+  b.value = '在吗'; b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(600);
+const inHistory = await evaluate(page, `(() => {
+  const body = window.__sent[0] || { messages: [] };
+  return body.messages.some(m => String(m.content || '').indexOf('小窗口') >= 0);
+})()`);
+ok(!inHistory, '开场白**没有**进发给模型的历史（不占 token、不误导模型）');
+
+/* ============================================================
    十二、资料库：文档按需读取，不烧 token
    ============================================================
    要点：上传的文档**不进提示词**（否则每一轮都在为它付钱），

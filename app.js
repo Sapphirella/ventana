@@ -1444,6 +1444,7 @@
     persistCfg();
     updateModelTag();
     renderBanner();
+    refreshGreeting();          // 接上/断开模型后，开场白要跟着换
     if (!apiConfigured()) {
       sayMsg('已保存。连接三项还没齐，仍然走演示模式。');
       toast('已保存 · 仍是演示模式');
@@ -1460,6 +1461,7 @@
     persistCfg();
     fillCfgForm();
     updateModelTag();
+    refreshGreeting();
     sayMsg('连接已清除，回到演示模式。人格保留着。');
     toast('已回到演示模式');
   });
@@ -1542,6 +1544,24 @@
       + '3. 点「试一试」确认能通，再点「保存」\n\n'
       + '然后我们就能真的聊起来。';
   }
+  /* 开场白是按"当前有没有接上模型"写出来的，而它又落盘成了消息 ——
+     所以每次连接状态变化（保存 / 清除连接）都要把已存的那条**重新写一遍**，
+     否则接上 API 之后还挂着"现在还是演示模式…点右上角那枚齿轮"那段话，
+     看起来像没生效。 */
+  function refreshGreeting() {
+    var text = welcomeText();
+    var touched = false;
+    store.convs.forEach(function (c) {
+      (c.messages || []).forEach(function (m) {
+        if (m.greet && m.content !== text) { m.content = text; touched = true; }
+      });
+    });
+    if (!touched) return false;
+    saveStore();
+    if (current && msgs().some(function (m) { return m.greet; })) restoreLog();
+    return true;
+  }
+
   /** 只在空会话时种下欢迎语。**自己负责渲染**，调用方不要再调 restoreLog */
   function welcome() {
     if (msgs().length) return false;
