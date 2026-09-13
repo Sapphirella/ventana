@@ -1,4 +1,4 @@
-  var VERSION = 'v0.13';
+  var VERSION = 'v0.14';
   var $ = function (s) { return document.querySelector(s); };
   var logEl = $('#log'), box = $('#box'), sendBtn = $('#send');
 
@@ -12,6 +12,8 @@
   var K_CONVS = 'ventana.convs';      // 会话表（当前 + 归档）
   var K_DOCS = 'ventana.docs';        // 技能文档库（按需读取，不整段塞提示词）
   var K_MEM = 'ventana.memory';       // 记忆馆条目
+  var K_MEM_NEW = 'ventana.memNew';   // 记忆馆未读标记：有 '1' 表示顶栏要亮感叹号
+  var K_SYNC = 'ventana.sync';        // 更新待同步标记：{ prompt: bool, docs: bool }
   var OLD_KEYS = { 'chambre.cfg': K_CFG, 'chambre.msgs': K_MSGS };
   (function migrateKeys() {
     try {
@@ -155,8 +157,68 @@
       return '- 《' + d.name + '》（' + d.text.length + ' 字）：' + head + '…';
     });
     return '【可读文档】你手上还有这些资料，现在只看到索引。'
-      + '需要哪一份就在回复里单独写一行 [[读:文档名]]，系统会把全文给你。'
+      + '需要哪一份就在回复里单独写一行 [[读:文档名]]，系统会把相关内容给你。'
       + '不要凭空猜里面的内容，也不要一次要好几份。\n' + lines.join('\n');
+  }
+
+  /* >6000 字的大文档按需截取：只给与「当前话题」最相关的部分。
+     相关性用字符 bigram 重叠度衡量（确定性、零依赖），
+     从命中块向两侧扩展直到凑够 6000 字；完全没命中就取开头。
+     这样模型每次索取最多只烧 6000 字的 token，不会整篇读。 */
+  var DOC_SNIPPET_MAX = 6000;
+  function docBigrams(text) {
+    var s = String(text || '').replace(/[^A-Za-z0-9\u4e00-\u9fa5]/g, '').toLowerCase();
+    var set = {};
+    for (var i = 0; i < s.length - 1; i++) set[s.slice(i, i + 2)] = true;
+    return set;
+  }
+  function splitDocBlocks(text) {
+    var out = [];
+    String(text || '').split(/\n{2,}/).forEach(function (para) {
+      var p = para.trim();
+      if (!p) return;
+      if (p.length <= 400) { out.push({ text: p }); return; }
+      (p.match(/[^。！？.!?；;]+[。！？.!?；;]?/g) || [p]).forEach(function (sent) {
+        var s = sent.trim();
+        if (!s) return;
+        /* 超长句（如无标点的长文本）切成 ≤1200 字的连续块，绝不丢字 */
+        while (s.length > 1200) { out.push({ text: s.slice(0, 1200) }); s = s.slice(1200); }
+        out.push({ text: s });
+      });
+    });
+    return out;
+  }
+  function docSnippet(doc) {
+    var text = doc.text || '';
+    if (text.length <= DOC_SNIPPET_MAX) return text;
+    var ctx = msgs().filter(function (m) { return m.role === 'user' && m.content; })
+      .slice(-2).map(function (m) { return m.content; }).join(' ');
+    var target = docBigrams(ctx + ' ' + (doc.name || ''));
+    var targetKeys = Object.keys(target);
+    var blocks = splitDocBlocks(text);
+    var best = null;
+    blocks.forEach(function (b, i) {
+      var bg = docBigrams(b.text), hit = 0;
+      for (var k = 0; k < targetKeys.length; k++) if (bg[targetKeys[k]]) hit++;
+      if (!best || hit > best.hit) best = { i: i, len: b.text.length, hit: hit };
+    });
+    if (!best || !best.hit) return text.slice(0, DOC_SNIPPET_MAX);
+    /* 以命中块为中心，向两侧扩展一个**连续区间**（保持文档连贯）。
+       每次取较短的一侧吃；较短侧都装不下时，另一侧必然更装不下，即停。 */
+    var lo = best.i, hi = best.i, total = best.len;
+    while (lo > 0 || hi + 1 < blocks.length) {
+      var backLen = lo > 0 ? blocks[lo - 1].text.length : Infinity;
+      var fwdLen = hi + 1 < blocks.length ? blocks[hi + 1].text.length : Infinity;
+      var takeBack;
+      if (backLen === Infinity) takeBack = false;
+      else if (fwdLen === Infinity) takeBack = true;
+      else takeBack = backLen <= fwdLen;
+      var addLen = takeBack ? backLen : fwdLen;
+      if (total + addLen > DOC_SNIPPET_MAX) break;
+      total += addLen;
+      if (takeBack) lo--; else hi++;
+    }
+    return blocks.slice(lo, hi + 1).map(function (b) { return b.text; }).join('\n\n');
   }
 
   /* ============================================================
@@ -179,6 +241,7 @@
     memories.push(item);
     memories.sort(function (a, b) { return b.at - a.at; });
     saveMemories();
+    markMemoryNew();          // 有新内容 → 顶栏亮感叹号，进记忆馆查看后消失
     return item;
   }
   function memoryIndexText() {
@@ -245,14 +308,57 @@
   /* 系统消息 = 人格 + 文档索引 + 记忆索引。
      注意后两者只是**索引**（标题 + 开头几个字），正文要模型自己索取 ——
      这一层就是"不烧 token"的关键：文档再长，每轮的固定开销也只有几行。 */
+  /* 更新待同步：用户在设置页改过系统提示词 / 上传或删过资料库后，
+     下一轮把「全部内容」整段发一次，让模型立刻知道内容变了；
+     之后就恢复默认读取方式（人格全文依旧带，文档只给索引按需取）。 */
+  function loadSync() {
+    try {
+      var raw = localStorage.getItem(K_SYNC);
+      if (raw) {
+        var s = JSON.parse(raw);
+        return { prompt: !!s.prompt, docs: !!s.docs };
+      }
+    } catch (e) {}
+    return { prompt: false, docs: false };
+  }
+  function persistSync(sync) {
+    try { localStorage.setItem(K_SYNC, JSON.stringify(sync)); } catch (e) {}
+  }
+  function noteSourceChange(kind) {
+    var s = loadSync();
+    s[kind] = true;
+    persistSync(s);
+  }
+  function clearSync() {
+    try { localStorage.removeItem(K_SYNC); } catch (e) {}
+  }
+  function docFullText() {
+    if (!docs.length) return '';
+    return docs.map(function (d) {
+      return '《' + (d.name || '未命名') + '》：\n' + (d.text || '');
+    }).join('\n\n');
+  }
   function buildMessages(list) {
     var parts = [];
+    var sync = loadSync();
     var sys = (persona.text || '').trim();
-    if (sys) parts.push(sys);
+    if (sys) {
+      parts.push(sync.prompt
+        ? '【系统提示词刚刚更新】以下是当前系统提示词的完整内容，请以此为准：\n\n' + sys
+        : sys);
+    }
     var di = docIndexText();
-    if (di) parts.push(di);
+    if (di) {
+      if (sync.docs) {
+        parts.push('【资料库刚刚更新】以下是资料库全部文档的完整内容（仅本次提供全文，之后恢复按需读取）：\n\n'
+          + docFullText());
+      } else {
+        parts.push(di);
+      }
+    }
     var mi = memoryIndexText();
     if (mi) parts.push(mi);
+    if (sync.prompt || sync.docs) clearSync();   // 全量只消费一次
     if (!parts.length) return list;
     return [{ role: 'system', content: parts.join('\n\n') }].concat(list);
   }
@@ -871,6 +977,10 @@
           + (docs.map(function (d) { return d.name; }).join('、') || '（空的）');
       }
       addSystem('读了《' + doc.name + '》（' + doc.text.length + ' 字）');
+      if (doc.text.length > DOC_SNIPPET_MAX) {
+        return '《' + doc.name + '》共 ' + doc.text.length + ' 字，以下是与当前话题最相关'
+          + '的部分（最多 ' + DOC_SNIPPET_MAX + ' 字，按需截取）：\n\n' + docSnippet(doc);
+      }
       return '《' + doc.name + '》全文：\n\n' + doc.text;
     }
     if (kind === '忆') {
@@ -895,7 +1005,6 @@
       if (!String(body).trim()) return '没写内容，这条没有记下来。';
       var item = addMemory(title, body);
       addSystem('记下了 · ' + item.title);
-      renderMemoryBadge();
       return '已记下「' + item.title + '」。';
     }
     return '不认识的指令：' + kind;
@@ -1261,7 +1370,7 @@
   }
 
   function openConfig() { fillCfgForm(); showView('config'); }
-  function openMemory() { renderMemory(); renderArchives(); showView('memory'); }
+  function openMemory() { clearMemoryNew(); renderMemory(); renderArchives(); showView('memory'); }
   $('#openMemory').addEventListener('click', openMemory);
   $('#memBack').addEventListener('click', function () { showView('chat'); scrollLog(); });
   $('#memArchive').addEventListener('click', function () {
@@ -1390,8 +1499,10 @@
   /* 人格：保存按钮单独走一条路。
      它和 API 三项是两回事 —— 只想改性格的人不该被"API 三项没填完"挡住。 */
   function savePrompt(quiet) {
+    var changed = fPrompt.value !== persona.text;
     persona.text = fPrompt.value;
     savePersona();
+    if (changed) noteSourceChange('prompt');   // 人格真的变了 → 下一轮全量下发
     updatePromptStat();
     updateModelTag();
     if (!quiet) toast(persona.text.trim() ? '人格已保存' : '人格已清空');
@@ -1424,6 +1535,7 @@
       persona.file = file.name;
       fPrompt.value = persona.text;
       savePersona();
+      noteSourceChange('prompt');       // 文件读入 = 人格内容变了
       updatePromptStat();
       updateModelTag();
       sayMsg('已读入 ' + file.name + '（' + persona.text.length + ' 字），检查一遍内容再决定要不要改。');
@@ -1619,12 +1731,31 @@
   /* ============================================================
      记忆馆（UI）
      ============================================================ */
-  var memListEl = $('#memList'), archListEl = $('#archList'), memCountEl = $('#memCount');
+  var memListEl = $('#memList'), archListEl = $('#archList'),
+      memNewEl = $('#memNew'), memTotalEl = $('#memTotal');
 
-  function renderMemoryBadge() {
-    if (!memCountEl) return;
-    memCountEl.hidden = !memories.length;
-    memCountEl.textContent = memories.length;
+  /* 顶栏感叹号：AI 刚往记忆馆写了新内容时亮起，进记忆馆看过就消失。
+     条数不再放顶栏 —— 用户要的是"点进去才知道这里有多少"，免得分心。 */
+  function memHasNew() {
+    try { return localStorage.getItem(K_MEM_NEW) === '1'; } catch (e) { return false; }
+  }
+  function markMemoryNew() {
+    try { localStorage.setItem(K_MEM_NEW, '1'); } catch (e) {}
+    renderMemNewBadge();
+  }
+  function clearMemoryNew() {
+    try { localStorage.removeItem(K_MEM_NEW); } catch (e) {}
+    renderMemNewBadge();
+  }
+  function renderMemNewBadge() {
+    if (!memNewEl) return;
+    memNewEl.hidden = !memHasNew();
+  }
+  /* 总数只在记忆馆视图里显示（顶栏不再有数字） */
+  function renderMemTotal() {
+    if (!memTotalEl) return;
+    memTotalEl.hidden = !memories.length;
+    memTotalEl.textContent = '共 ' + memories.length + ' 条记忆';
   }
 
   function fmtDay(ts) {
@@ -1637,7 +1768,8 @@
   }
 
   function renderMemory() {
-    renderMemoryBadge();
+    renderMemNewBadge();
+    renderMemTotal();
     if (!memListEl) return;
     if (!memories.length) {
       memListEl.innerHTML = '<div class="empty-note">还是空的。<br>'
@@ -1892,6 +2024,7 @@
     docs.push(d);
     var ok = saveDocs();
     if (!ok) { docs.pop(); return null; }
+    noteSourceChange('docs');     // 资料库有新增 → 下一轮全量下发一次
     renderDocs();
     return d;
   }
@@ -1940,6 +2073,7 @@
     var id = el.getAttribute('data-did');
     docs = docs.filter(function (d) { return d.id !== id; });
     saveDocs();
+    noteSourceChange('docs');     // 删了资料也算更新 → 下一轮全量同步一次
     renderDocs();
     toast('已删除这份资料');
   });
@@ -1951,7 +2085,8 @@
   loadPersona();
   updateModelTag();
   syncComposer();
-  renderMemoryBadge();
+  renderMemNewBadge();
+  renderMemTotal();
   renderDocs();
 
   /* 移动端键盘：interactive-widget=resizes-content 已由浏览器接管；这里兜底适配 */

@@ -224,11 +224,16 @@
   .typingbar i:nth-child(2) { animation-delay: .16s; }
   .typingbar i:nth-child(3) { animation-delay: .32s; }
 
-  /* 记忆馆入口上的数字 */
+  /* 记忆馆入口上的计数（现在是感叹号：有新内容才亮，条数只在记忆馆里显示） */
   .chip .count {
     flex: none; min-width: 15px; padding: 0 4px; border-radius: 8px;
     background: var(--accent-bg); color: var(--accent-fg);
     font-size: 10.5px; line-height: 15px; text-align: center;
+  }
+
+  /* 记忆馆里的总数行 */
+  .mem-total {
+    font-size: 12px; color: var(--text-2); margin: -4px 2px 10px;
   }
 
   /* ---------- 记忆馆 / 归档列表 ---------- */

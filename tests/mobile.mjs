@@ -1245,14 +1245,49 @@ if (body1) {
   const sys = body1.messages[0];
   ok(sys.role === 'system', '有 system 消息');
   ok(sys.content.indexOf('安静的人') >= 0, 'system 里有系统提示词');
-  ok(sys.content.indexOf('世界观.md') >= 0 && sys.content.indexOf('日记.txt') >= 0,
-    'system 里有文档索引（两个文件名都出现了）');
-  ok(sys.content.indexOf('这是一份很长很长的设定文档。'.repeat(3)) < 0,
-    'system 里**没有**文档全文（索引里只截了开头 60 字）');
-  ok(sys.content.length < 800,
-    `system 整体很短，没被文档撑大（${sys.content.length} 字）`);
+  ok(sys.content.indexOf('【资料库刚刚更新】') >= 0,
+    '文档刚上传 → 本轮 system 带"资料库刚刚更新"声明');
+  ok(sys.content.indexOf('这是一份很长很长的设定文档') >= 0
+    && sys.content.indexOf('日记正文：今天下雨了') >= 0,
+    '首轮：两份文档的**完整正文**随本轮下发一次');
+  ok(sys.content.indexOf('可读文档') < 0,
+    '首轮：全文代替索引（不再给"可读文档"索引）');
+  ok(sys.content.length > 480,
+    `首轮 system 被全文撑大（${sys.content.length} 字，全量仅此一次）`);
   ok(Array.isArray(body1.tools) && body1.tools.length >= 2,
     `请求里带了 tools（${(body1.tools || []).map(t => t.function.name).join(', ')}）`);
+}
+
+/* 上传后的次轮：恢复默认读取方式——索引回归，全文不再出现 */
+await evaluate(page, `(() => {
+  window.__sent = [];
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') >= 0) {
+      window.__sent.push(JSON.parse(init.body));
+      return Promise.resolve(new Response(sseBody([{ content: '好呀' }]),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+    }
+    return realFetch.apply(this, arguments);
+  };
+  const b = document.querySelector('#box');
+  b.value = '继续';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(450);
+const body2 = await evaluate(page, `(() => window.__sent[0] || null)()`);
+ok(!!body2, '次轮发出了请求');
+if (body2) {
+  const sys2 = body2.messages[0];
+  ok(sys2.content.indexOf('可读文档') >= 0, '次轮：恢复默认读取方式（文档索引回归）');
+  ok(sys2.content.indexOf('【资料库刚刚更新】') < 0, '次轮：全量声明消失');
+  ok(sys2.content.indexOf('《世界观.md》：') < 0 && sys2.content.indexOf('《日记.txt》：') < 0,
+    '次轮：文档全文不再出现（按需才读）');
+  ok(sys2.content.length < 800,
+    `次轮 system 恢复很短，没被文档撑大（${sys2.content.length} 字）`);
 }
 
 /* 原生工具调用：模型要求读文档 → 我们给全文 → 再问一次 */
@@ -1767,11 +1802,20 @@ const memWrite = await evaluate(page, `(() => {
 await goto(page, URL_);
 await sleep(400);
 const badge = await evaluate(page, `(() => ({
-  count: document.querySelector('#memCount').textContent,
-  hidden: document.querySelector('#memCount').hidden,
+  noCounter: !document.querySelector('#memCount'),
+  newHidden: !!document.querySelector('#memNew') && document.querySelector('#memNew').hidden,
   title: document.querySelector('#openMemory').title,
 }))()`);
-ok(!badge.hidden && badge.count === '2', `顶栏记忆馆入口显示条数（${badge.count}）`);
+ok(badge.noCounter, '顶栏记忆馆入口不再显示记忆条数');
+ok(badge.newHidden, '预置记忆（非新写入）不亮感叹号');
+
+await evaluate(page, "(() => { document.querySelector('#openMemory').click(); return 1; })()");
+await sleep(300);
+const memTotalUi = await evaluate(page, "(() => { const t = document.querySelector('#memTotal'); return t ? t.textContent : null; })()");
+ok(memTotalUi === '共 2 条记忆', `记忆馆内显示总数（${memTotalUi}）`);
+
+await evaluate(page, "(() => { document.querySelector('#memBack').click(); return 1; })()");
+await sleep(200);
 
 await evaluate(page, "(() => { document.querySelector('#openMemory').click(); return 1; })()");
 await sleep(300);
@@ -1841,14 +1885,16 @@ ok(memArgs.indexOf('她说明天要早起') >= 0 && memArgs.indexOf('记住这�
 const memWrote = await evaluate(page, `(() => ({
   stored: JSON.parse(localStorage.getItem('ventana.memory')).map(m => m.title),
   sysLines: [...document.querySelectorAll('#log .sysline')].map(s => s.textContent),
-  badge: document.querySelector('#memCount').textContent,
+  newShown: !!document.querySelector('#memNew') && !document.querySelector('#memNew').hidden,
+  newFlag: localStorage.getItem('ventana.memNew'),
   hasAt: JSON.parse(localStorage.getItem('ventana.memory')).every(m => typeof m.at === 'number'),
 }))()`);
 ok(memWrote.stored.indexOf('记住这件事') >= 0,
   `AI 通过工具写入了一条记忆（${memWrote.stored.join('、')}）`);
 ok(memWrote.sysLines.some(t => t.indexOf('记下了') >= 0),
   `聊天里出现"记下了"的系统事件（${memWrote.sysLines.join(' / ')}）`);
-ok(memWrote.badge === '3', `顶栏计数跟着涨（${memWrote.badge}）`);
+ok(memWrote.newShown && memWrote.newFlag === '1',
+  `新记忆写入后顶栏亮起感叹号（memNew=${memWrote.newFlag}）`);
 ok(memWrote.hasAt, '每条记忆都带时间戳');
 
 /* 取记忆：索引在提示词里，正文按需取 */
@@ -1886,6 +1932,174 @@ ok(memReadRes.sysHasIndex, '提示词里有记忆的**标题索引**');
 ok(!memReadRes.sysHasBody, '提示词里**没有**记忆正文（所以不烧 token）');
 ok(memReadRes.echoedBody, 'AI 索取后正文才被送进上下文');
 ok(memReadRes.sysLines.some(t => t.indexOf('取了记忆') >= 0), '留下"取了记忆"的系统事件');
+
+/* 新内容感叹号：看过就消失，条数只在记忆馆里显示 */
+const memNewBefore = await evaluate(page, `(() => ({
+  shown: !!document.querySelector('#memNew') && !document.querySelector('#memNew').hidden,
+  flag: localStorage.getItem('ventana.memNew'),
+}))()`);
+ok(memNewBefore.shown && memNewBefore.flag === '1', 'AI 写入新记忆后感叹号亮着（未读标记已持久化）');
+await evaluate(page, "(() => { document.querySelector('#openMemory').click(); return 1; })()");
+await sleep(300);
+const memNewIn = await evaluate(page, `(() => ({
+  newHidden: document.querySelector('#memNew').hidden,
+  total: document.querySelector('#memTotal').textContent,
+  items: document.querySelectorAll('#memList .item').length,
+  flagGone: localStorage.getItem('ventana.memNew') === null,
+}))()`);
+ok(memNewIn.newHidden && memNewIn.flagGone, '进入记忆馆后感叹号消失（未读标记清除）');
+ok(memNewIn.total === '共 3 条记忆', `记忆馆内显示总数（${memNewIn.total}）`);
+ok(memNewIn.items === 3, `记忆馆列出三条（${memNewIn.items}）`);
+await evaluate(page, "(() => { document.querySelector('#memBack').click(); return 1; })()");
+await sleep(200);
+const memNewBack = await evaluate(page, "document.querySelector('#memNew').hidden");
+ok(memNewBack, '返回对话界面后感叹号不再出现');
+
+/* 更新后全量下发一次：人格/资料库变了 → 下一轮全文进上下文，再下一轮恢复索引 */
+await evaluate(page, `(() => {
+  localStorage.setItem('ventana.docs', JSON.stringify([
+    { id: 'd1', name: '鲸鱼百科', text: '鲸鱼是海洋哺乳动物。'.repeat(10), at: Date.now() },
+    { id: 'd2', name: '旧版资料', text: '旧版资料第一段填充内容。'.repeat(8) + '旧版资料末尾独有的标志词：琥珀色帆船。'.repeat(3), at: Date.now() - 1000 },
+  ]));
+  localStorage.setItem('ventana.prompt', JSON.stringify({ text: '旧人格：冷静的图书管理员。', file: '' }));
+  return 1;
+})()`);
+await goto(page, URL_);
+await sleep(400);
+await evaluate(page, "(() => { document.querySelector('#openConfig').click(); return 1; })()");
+await sleep(200);
+await evaluate(page, `(() => {
+  const p = document.querySelector('#cfgPrompt');
+  p.value = '新人格：温柔的海豚训养员。';
+  p.dispatchEvent(new Event('input'));
+  document.querySelector('#promptSave').click();
+  return 1;
+})()`);
+await sleep(150);
+const sync1 = await evaluate(page, "JSON.parse(localStorage.getItem('ventana.sync')||'{}')");
+ok(sync1.prompt === true, '改人格后 sync.prompt 置位（下一轮全量下发）');
+await evaluate(page, `(() => {
+  const del = document.querySelector('#docList [data-dact="del"]');
+  if (del) del.click();
+  return 1;
+})()`);
+await sleep(150);
+const sync2 = await evaluate(page, "JSON.parse(localStorage.getItem('ventana.sync')||'{}')");
+ok(sync2.docs === true, '删资料后 sync.docs 置位');
+await evaluate(page, "(() => { document.querySelector('#backChat').click(); return 1; })()");
+await sleep(200);
+
+/* 第一轮：全部内容随消息发给 AI 一次 */
+await evaluate(page, `(() => {
+  window.__sent = [];
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') < 0) return realFetch.apply(this, arguments);
+    window.__sent.push(JSON.parse(init.body));
+    return Promise.resolve(new Response(sseBody([{ content: '好的，这是更新后的第一轮。' }]),
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+  };
+  const b = document.querySelector('#box');
+  b.value = '我们聊聊鲸鱼吧';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(400);
+const round1 = await evaluate(page, `(() => {
+  const c = String((window.__sent[0] && window.__sent[0].messages[0] || {}).content || '');
+  return {
+    promptUpdated: c.indexOf('【系统提示词刚刚更新】') >= 0,
+    newPersona: c.indexOf('海豚训养员') >= 0 && c.indexOf('图书管理员') < 0,
+    docsUpdated: c.indexOf('【资料库刚刚更新】') >= 0,
+    remainingDocFull: c.indexOf('琥珀色帆船') >= 0,
+    deletedDocAbsent: c.indexOf('海洋哺乳动物') < 0,
+  };
+})()`);
+ok(round1.promptUpdated && round1.newPersona, '首轮：更新后的系统提示词全文 + 更新声明');
+ok(round1.docsUpdated && round1.remainingDocFull && round1.deletedDocAbsent,
+  '首轮：资料库全部文档正文发送一次（已删的不出现）');
+
+/* 第二轮：恢复默认读取方式（人格全文依旧，文档只给索引） */
+await evaluate(page, `(() => {
+  window.__sent = [];
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') < 0) return realFetch.apply(this, arguments);
+    window.__sent.push(JSON.parse(init.body));
+    return Promise.resolve(new Response(sseBody([{ content: '好的，默认模式。' }]),
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+  };
+  const b = document.querySelector('#box');
+  b.value = '继续';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(400);
+const round2 = await evaluate(page, `(() => {
+  const c = String((window.__sent[0] && window.__sent[0].messages[0] || {}).content || '');
+  return {
+    noDocFull: c.indexOf('琥珀色帆船') < 0,
+    noUpdatedMark: c.indexOf('【资料库刚刚更新】') < 0 && c.indexOf('【系统提示词刚刚更新】') < 0,
+    hasIndex: c.indexOf('可读文档') >= 0,
+  };
+})()`);
+ok(round2.noDocFull && round2.noUpdatedMark && round2.hasIndex,
+  '次轮：恢复默认（文档只给索引，更新声明消失）');
+
+/* 大文档按需截取：>6000 字时只给与当前话题最相关的部分 */
+const fill = (w, n) => Array(n).fill(w).join('');
+const bigDoc = fill('甲', 1100) + '\n\n'
+  + '鲸鱼的核心：鲸鱼用肺呼吸、喂奶给幼崽，是温血的海洋哺乳动物。'.repeat(20) + '\n\n'
+  + fill('乙', 2500) + '\n\n' + fill('丙', 2500) + '\n\n' + fill('丁', 1400) + '\n\n'
+  + '长颈鹿尾巴卷曲，这一句放在文档末尾作为独有标志。'.repeat(3);
+await evaluate(page, `(() => {
+  localStorage.setItem('ventana.docs', JSON.stringify([
+    { id: 'big1', name: '海洋生物大全', text: ${JSON.stringify(bigDoc)}, at: Date.now() },
+  ]));
+  localStorage.setItem('ventana.sync', JSON.stringify({ prompt: false, docs: false }));
+  return 1;
+})()`);
+await goto(page, URL_);
+await sleep(400);
+await evaluate(page, `(() => {
+  window.__sent = [];
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') < 0) return realFetch.apply(this, arguments);
+    window.__sent.push(JSON.parse(init.body));
+    const n = window.__sent.length;
+    const sse = n === 1
+      ? sseBody([{ content: '\\n[[读:海洋生物大全]]' }])
+      : sseBody([{ content: '读到了。' }]);
+    return Promise.resolve(new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+  };
+  const b = document.querySelector('#box');
+  b.value = '鲸鱼平时吃什么？';
+  b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(450);
+const snipRes = await evaluate(page, `(() => {
+  const all = window.__sent.map(x => x.messages).flat();
+  const hit = all.filter(m => m.role === 'tool' || (m.role === 'user' && String(m.content).indexOf('按需截取') >= 0));
+  const t = hit.length ? String(hit[hit.length - 1].content) : '';
+  return {
+    found: t.indexOf('鲸鱼') >= 0,
+    tailOut: t.indexOf('长颈鹿尾巴卷曲') < 0,
+    len: t.length,
+    docLen: ${JSON.stringify(bigDoc.length)},
+    indexFirst: String((window.__sent[0] && window.__sent[0].messages[0] || {}).content || '').indexOf('可读文档') >= 0,
+  };
+})()`);
+ok(snipRes.indexFirst, '平时第一轮 system 里文档只给索引（不整篇带）');
+ok(snipRes.found && snipRes.tailOut, '按需截取包含目标相关内容、不含尾部无关内容');
+ok(snipRes.len >= 3000 && snipRes.len <= 6500, `按需截取：文档 ${snipRes.docLen} 字只给相关部分（实际 ${snipRes.len} 字，≤6000 上限）`);
 
 /* 旧数据迁移：老用户的 messages 数组要变成第一个会话 */
 await evaluate(page, `(() => {

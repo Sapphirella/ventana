@@ -25,7 +25,7 @@
         <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H4z"></path>
         <path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H14a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2h6z"></path>
       </svg>
-      <span>记忆馆</span><span class="count" id="memCount" hidden>0</span>
+      <span>记忆馆</span><span class="count" id="memNew" hidden>!</span>
     </button>
     <button class="iconbtn" id="exportChat" aria-label="导出当前会话为 txt" title="导出当前会话为 txt">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -208,6 +208,8 @@
         平时它只看到<b>标题索引</b>，需要时才会取正文 —— 这样不烧 token。<br>
         顶栏右边那个箱子是<b>已归档会话</b>，点一下从旁边滑出来。
       </div>
+
+      <div id="memTotal" class="mem-total" hidden></div>
 
       <div id="memList"></div>
     </div>
