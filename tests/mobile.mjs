@@ -663,6 +663,37 @@ const cleared = await evaluate(page, `(() => ({
 ok(cleared.value === '' && (!cleared.stored || !cleared.stored.text), '点「清空」后输入框与存储都清干净');
 ok(cleared.stat.indexOf('还没写') >= 0, '清空后状态行回到初始说明');
 
+/* 手机端软键盘的坑：点 textarea 弹键盘后可视高度从 844 压到 ~480，
+   浏览器只管"露出一点"不管"够不够用"——输入框下半截被键盘压住，
+   光标看不见，表现就是"没法输入"。修法是聚焦 + visualViewport resize
+   时把输入框滚到键盘上方的可视区中央。下面这三条就是守这个修的。 */
+await evaluate(page, "document.querySelector('#cfgPrompt').focus()");
+await sleep(50);
+await page.send('Emulation.setDeviceMetricsOverride', {
+  width: 390, height: 480, deviceScaleFactor: 3, mobile: true,
+  screenWidth: 390, screenHeight: 480,
+});
+await sleep(700);   // 等聚焦延时 350ms + resize 延时 80ms + 平滑滚动走完
+const kbState = await evaluate(page, `(() => {
+  const ta = document.querySelector('#cfgPrompt');
+  const r = ta.getBoundingClientRect();
+  return {
+    visH: window.innerHeight,
+    top: Math.round(r.top), bottom: Math.round(r.bottom),
+    fullyVisible: r.top >= -1 && r.bottom <= window.innerHeight + 1,
+    focused: document.activeElement === ta,
+  };
+})()`);
+ok(kbState.focused, '键盘弹起后输入框仍持有焦点');
+ok(kbState.fullyVisible,
+  `键盘弹起把可视区压到 ${kbState.visH}px 后输入框整体在可视区内（top=${kbState.top}, bottom=${kbState.bottom}）`);
+await page.send('Input.insertText', { text: '键盘在的时候也能敲进来' });
+await sleep(200);
+const kbTyped = await evaluate(page, `document.querySelector('#cfgPrompt').value`);
+ok(kbTyped.indexOf('键盘在的时候也能敲进来') >= 0, '键盘弹起时输入的内容真的进了输入框');
+await emulateMobile(page, { width: 390, height: 844, dpr: 3 });
+await sleep(300);
+
 /* ============================================================
    八、系统提示词真的被送出去了吗（关键：不能只是存下来）
    ============================================================ */

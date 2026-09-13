@@ -1,4 +1,4 @@
-  var VERSION = 'v0.11';
+  var VERSION = 'v0.12';
   var $ = function (s) { return document.querySelector(s); };
   var logEl = $('#log'), box = $('#box'), sendBtn = $('#send');
 
@@ -1347,6 +1347,44 @@
     updatePromptStat();
     renderBanner();
     sayMsg('');
+  }
+
+  /* ---------- 手机端软键盘：别让键盘把系统提示词输入框盖住 ----------
+     手机上点 textarea 会弹软键盘，可视高度从 844 缩到 ~480。
+     浏览器只对「最小滚动」负责，.cfg 是嵌套滚动容器，往往只滚到
+     「输入框露出一点」——下半截（甚至光标位置）直接被键盘压住，
+     用户打字看不见，表现为"没法输入"。
+     修法：聚焦时、以及键盘弹起（visualViewport 变化）时，手动把
+     输入框滚到可视区中央。取 visualViewport 的高度而不是 innerHeight
+     —— iOS 键盘不缩布局视口，innerHeight 不变，只有 visualViewport 知道真相。 */
+  var cfgEl = document.querySelector('.cfg');
+  var kbTimer = 0;
+  function keepPromptInView() {
+    if (!cfgEl || !fPrompt) return;
+    // 只在这个输入框持有焦点时干预，别在用户滚别的区域时乱滚
+    if (document.activeElement !== fPrompt) return;
+    var vv = window.visualViewport;
+    var vh = vv ? vv.height : window.innerHeight;      // 键盘上方还能看到的高度
+    var r = fPrompt.getBoundingClientRect();
+    if (r.bottom > vh - 12) {                          // 底部被键盘压住了
+      fPrompt.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } else if (r.top < 40) {                           // 顶部被顶出屏幕
+      fPrompt.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }
+  function schedulePromptScroll(ms) {
+    clearTimeout(kbTimer);
+    kbTimer = setTimeout(keepPromptInView, ms);
+  }
+  fPrompt.addEventListener('focus', function () {
+    schedulePromptScroll(350);       // 等键盘弹出动画走完再算，否则高度还没缩到位
+  });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', function () {
+      schedulePromptScroll(80);      // 键盘弹起/收起都会触发这个
+    });
+  } else {
+    window.addEventListener('resize', function () { schedulePromptScroll(80); });
   }
 
   /* 人格：保存按钮单独走一条路。
