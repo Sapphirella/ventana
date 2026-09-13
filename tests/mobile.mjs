@@ -1521,6 +1521,48 @@ await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.
 await sleep(300);
 
 /* ============================================================
+    ★ 顶栏导出当前会话（txt）
+   ============================================================ */
+console.log('\n=== 顶栏导出当前会话 ===');
+await fresh('light');
+await sendText('顶栏导出这句话必须出现在 txt 里');
+await sleep(380);
+await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
+await sleep(300);
+
+/* 顶栏有导出按钮 */
+const topExportBtn = await evaluate(page, `(() => {
+  const b = document.querySelector('#exportChat');
+  return b ? { exists: true, aria: b.getAttribute('aria-label') || '' } : { exists: false };
+})()`);
+ok(topExportBtn.exists && topExportBtn.aria.indexOf('导出') >= 0,
+  `顶栏有导出当前会话按钮（${topExportBtn.exists ? topExportBtn.aria : '无'}）`);
+
+/* 点击后能拿到当前会话内容的 Blob，且文件名是 txt（拦截真实下载，只读内容） */
+const topExportInfo = await evaluate(page, `(async () => {
+  let captured = null, fileName = '';
+  const realCreate = URL.createObjectURL;
+  URL.createObjectURL = function (blob) { captured = blob; return realCreate.call(URL, blob); };
+  const stopDownload = (e) => {
+    const t = e.target;
+    if (t && t.tagName === 'A' && t.hasAttribute('download')) {
+      fileName = t.getAttribute('download') || '';
+      e.preventDefault();
+    }
+  };
+  document.addEventListener('click', stopDownload, true);
+  document.querySelector('#exportChat').click();
+  document.removeEventListener('click', stopDownload, true);
+  URL.createObjectURL = realCreate;
+  const text = captured ? await captured.text() : '';
+  return { text, fileName };
+})()`);
+ok(topExportInfo.fileName.endsWith('.txt'), `导出的文件名以 .txt 结尾（${topExportInfo.fileName}）`);
+ok(topExportInfo.text.indexOf('Ventana 会话记录') >= 0, '顶栏导出的 txt 有标题');
+ok(topExportInfo.text.indexOf('顶栏导出这句话必须出现在 txt 里') >= 0, '顶栏导出的 txt 里有当前会话的话');
+ok(topExportInfo.text.indexOf('我') >= 0, '顶栏导出的 txt 标出了说话人');
+
+/* ============================================================
    十四、会话归档
    ============================================================ */
 console.log('\n=== 会话归档 ===');

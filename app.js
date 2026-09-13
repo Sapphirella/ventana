@@ -1,4 +1,4 @@
-  var VERSION = 'v0.10';
+  var VERSION = 'v0.11';
   var $ = function (s) { return document.querySelector(s); };
   var logEl = $('#log'), box = $('#box'), sendBtn = $('#send');
 
@@ -1273,6 +1273,12 @@
     showView('chat');
   });
   $('#openConfig').addEventListener('click', openConfig);
+  $('#exportChat').addEventListener('click', function () {
+    // 顶栏导出：把「当前会话」整个倒成 txt（和归档抽屉里那个导出用同一套生成器）
+    if (!current || !msgs().length) { toast('这个会话还是空的，没有可导出的内容'); return; }
+    var ok = download(safeName(convTitle(current)) + '.txt', convToText(current), 'text/plain');
+    toast(ok ? '已导出当前会话为 txt' : '导出失败，浏览器不允许下载');
+  });
   ctxChip.addEventListener('click', openConfig);
   $('#backChat').addEventListener('click', function () {
     // 还没点保存就走了的话，输入框里的内容不该丢 —— 静默存下来
