@@ -1,4 +1,4 @@
-  var VERSION = 'v0.9';
+  var VERSION = 'v0.10';
   var $ = function (s) { return document.querySelector(s); };
   var logEl = $('#log'), box = $('#box'), sendBtn = $('#send');
 
@@ -56,9 +56,9 @@
   /* ============================================================
      会话（conversations）
      ------------------------------------------------------------
-     存两个集合：活跃的（active）与归档的（archived）。
-     归档只是打标记，不移动数据 —— 这样"归档 → 取消归档"是无损的，
-     也不用担心迁移时丢东西。
+存两个集合：活跃的（active）与归档的（archived）。
+  归档只是打标记，不移动数据 —— 导出、删除、改名都能直接在归档列表里做，
+  不用担心迁移时丢东西。
      结构：
        { id, title, createdAt, updatedAt, archived: false, messages: [...] }
      messages 里每条：{ role: 'user'|'assistant', content, at }
@@ -1727,7 +1727,7 @@
       meta.textContent = (c.messages || []).length + ' 条消息';
       var acts = document.createElement('div');
       acts.className = 'acts2';
-      [['restore', '取消归档'], ['export', '导出 txt'], ['del', '删除'], ['rename', '改名']]
+      [['export', '导出 txt'], ['del', '删除'], ['rename', '改名']]
         .forEach(function (d) {
           var b = document.createElement('button');
           b.type = 'button';
@@ -1766,12 +1766,7 @@
     var c = store.convs.filter(function (x) { return x.id === id; })[0];
     if (!c) return;
     var act = btn.getAttribute('data-cact');
-    if (act === 'restore') {
-      c.archived = false;
-      c.updatedAt = nowMs();
-      saveStore(); renderMemory();
-      toast('已取消归档，回到对话列表');
-    } else if (act === 'export') {
+    if (act === 'export') {
       var ok = download(safeName(convTitle(c)) + '.txt', convToText(c), 'text/plain');
       toast(ok ? '已导出 txt' : '这台设备不允许下载');
     } else if (act === 'rename') {

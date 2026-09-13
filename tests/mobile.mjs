@@ -1570,7 +1570,7 @@ ok(memView.visible && memView.chatHidden, '记忆馆是独立视图，打开时�
 ok(memView.archiveItems === 1, `归档列表里有 1 个会话`);
 ok(memView.archiveActs.indexOf('export') >= 0 && memView.archiveActs.indexOf('del') >= 0,
   `每个归档会话都有导出与删除（${memView.archiveActs.join(',')}）`);
-ok(memView.archiveActs.indexOf('restore') >= 0, '还能取消归档');
+ok(memView.archiveActs.indexOf('restore') < 0, '归档会话不再有取消归档按钮');
 ok(memView.sortedByCreated, '归档会话按创建时间排序');
 
 /* 导出 txt 的内容要能看 */
@@ -1579,7 +1579,15 @@ const exportText = await evaluate(page, `(() => {
   let captured = null;
   const realCreate = URL.createObjectURL;
   URL.createObjectURL = function (blob) { captured = blob; return realCreate.call(URL, blob); };
+  // 拦下真实的磁盘下载：测试只需要 Blob 内容，不需要往下载目录写文件
+  // （之前没拦，跑一次全量测试就在 ~/Downloads 落一个"第一个会话*.txt"）
+  const stopDownload = (e) => {
+    const t = e.target;
+    if (t && t.tagName === 'A' && t.hasAttribute('download')) e.preventDefault();
+  };
+  document.addEventListener('click', stopDownload, true);
   document.querySelector('#archList [data-cact=export]').click();
+  document.removeEventListener('click', stopDownload, true);
   URL.createObjectURL = realCreate;
   return captured ? captured.text() : Promise.resolve('');
 })()`);
