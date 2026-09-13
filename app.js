@@ -1,4 +1,4 @@
-  var VERSION = 'v0.7';
+  var VERSION = 'v0.8';
   var $ = function (s) { return document.querySelector(s); };
   var logEl = $('#log'), box = $('#box'), sendBtn = $('#send');
 
@@ -314,6 +314,7 @@
     var col = document.createElement('div');
     col.className = 'col';
     var body = document.createElement('div');
+    // 我方：.body 自己就是气泡；对方：.body.reply 是文字块（宽度=文字宽度）
     body.className = 'body ' + (kind === 'me' ? 'bubble' : 'reply');
     col.appendChild(body);
     row.appendChild(col);
@@ -390,7 +391,7 @@
 
   /** 给一条已经落地的消息补上菜单栏（流式结束后调用） */
   function attachActions(body, kind) {
-    if (!body || !body.parentNode) return;
+    if (!body || !body.parentNode || body._noActions) return;
     // 幂等：重新渲染（切会话、归档、重新生成）会走同一条路径，
     // 不给判断的话菜单会叠成两层 —— 看起来像"删一次少两行"
     var existing = body.parentNode.querySelector(':scope > .acts');   // .col > .acts
@@ -510,6 +511,7 @@
       } else {
         b = addMsg('ai', '', false);
         if (m.greet) {
+          b._noActions = true;     // 开场白不给操作按钮（作者要求）
           var h = document.createElement('p');
           h.className = 'hello';
           h.textContent = 'Ventana';
@@ -518,7 +520,7 @@
         renderMarkdown(b, m.content || '');
       }
       b._msgIndex = i;
-      attachActions(b, m.role === 'user' ? 'me' : 'ai');
+      if (!m.greet) attachActions(b, m.role === 'user' ? 'me' : 'ai');
     });
   }
   // 会话数据由启动段的 loadStore() 装载（见文件末尾「启动」一节）
@@ -928,6 +930,13 @@
     '然后我们就能真的聊起来。'
   ];
 
+  /* 演示节奏。测试可以把 window.__VENTANA_TEST_FAST 打开，把这些延迟压到最小 ——
+     整套浏览器测试本来要跑 55 秒（贴近 60 秒上限，边缘会开始 flaky），
+     压掉之后快一半。**生产环境下这个开关不存在**，节奏就是下面这些数。 */
+  function pacing(ms) {
+    return (typeof window !== 'undefined' && window.__VENTANA_TEST_FAST) ? 4 : ms;
+  }
+
   function demoStream(parts, onDelta) {
     return new Promise(function (resolve) {
       var pi = 0, ci = 0, timer = null, emitted = false;
@@ -940,13 +949,13 @@
         if (ci === 0 && !emitted) { emitted = true; onDelta('__NEW__'); }
         if (ci < seg.length) {
           onDelta(seg[ci]); ci++;
-          timer = setTimeout(tick, 14 + Math.random() * 12);
+          timer = setTimeout(tick, pacing(14 + Math.random() * 12));
         } else {
           pi++; ci = 0; emitted = false;
-          timer = setTimeout(tick, 420 + Math.random() * 520);   // 气泡之间的停顿
+          timer = setTimeout(tick, pacing(420 + Math.random() * 520));   // 气泡之间的停顿
         }
       }
-      timer = setTimeout(tick, 260);
+      timer = setTimeout(tick, pacing(260));
     });
   }
 
@@ -989,10 +998,7 @@
     if (currentAiMsg) commitReply(currentAiMsg, replyEls);
     // 流式结束才挂菜单：生成过程中挂上去，重新生成/删除按钮是能点但会出错的
     var idx = currentAiMsg ? msgs().indexOf(currentAiMsg) : -1;
-    replyEls.forEach(function (el, i) {
-      el._msgIndex = idx;
-      if (i === 0) attachActions(el, 'ai');
-    });
+    attachActionsToReply(replyEls, idx);
     replyEls = [];
     cur = null;
     currentAiEl = null;
@@ -1046,8 +1052,10 @@
     abortCtrl = new AbortController();
     /* 发给模型的对话：system（人格 + 文档索引 + 记忆索引）+ 历史。
        历史里**去掉**空的占位消息（正在生成的这条），它还没有内容。 */
+    /* 过滤两件事：空的占位消息（正在生成的这条），以及**开场白** ——
+       它不是角色说的话，进历史既占 token 又会误导模型。 */
     var history = buildMessages(msgs().filter(function (m) {
-      return m.content && m.content.length;
+      return m.content && m.content.length && !m.greet;
     }));
 
     (function round(n) {
@@ -1140,6 +1148,20 @@
     else document.body.appendChild(typingEl);
   }
 
+  /* 一轮回答的图标挂在哪：**最后一个有内容的气泡下面**。
+     一轮回答可能是多条气泡（演示模式会连发、工具调用会打断正文），
+     挂在第一条下面的话，图标会被夹在两段话中间（作者报过这个 bug）。
+     所有气泡共享同一个 _msgIndex —— 它们本来就是同一条 assistant 记录。 */
+  function attachActionsToReply(els, msgIndex) {
+    var target = null;
+    els.forEach(function (el) {
+      el._msgIndex = msgIndex;
+      if ((el._raw || '').length) target = el;
+    });
+    if (!target && els.length) target = els[els.length - 1];
+    if (target) attachActions(target, 'ai');
+  }
+
   /** 撤掉一个字都没有的气泡（工具调用前后会留下这种空壳） */
   function removeEmptyBubble(el) {
     if (!el) return;
@@ -1170,12 +1192,24 @@
       if (r) r.remove();
       replyEls.splice(i, 1);
     }
-    if (!replyEls.length) {
-      // 一条都没留下来：给个交代，别让屏幕像什么都没发生
-      var note = addMsg('ai', '', false);
-      note.classList.add('err');
-      note.textContent = '停下了。';
-      replyEls.push(note);
+    /* 上面这轮 remove 会把 replyEls 缩短，所以索引必须**重新取一次** ——
+       先算索引再删节点的话，删掉的那个空壳还占着位置（视图里会剩一个空气泡）。 */
+    if (currentAiMsg) {
+      var fixedIdx = msgs().indexOf(currentAiMsg);
+      attachActionsToReply(replyEls, fixedIdx);
+    }
+    if (currentAiMsg) {
+      var noteIdx = msgs().indexOf(currentAiMsg);
+      if (!replyEls.length) {
+        // 一条都没留下来：给个交代，别让屏幕像什么都没发生。
+        // 它同样要挂图标 —— 漏了的话这个气泡下面空着，像是坏的。
+        var note = addMsg('ai', '', false);
+        note.classList.add('err');
+        note.textContent = '停下了。';
+        note._msgIndex = noteIdx;
+        replyEls.push(note);
+        attachActions(note, 'ai');
+      }
     }
     if (currentAiMsg) commitReply(currentAiMsg, replyEls);
     cur = null;
@@ -1483,12 +1517,30 @@
   /* ---------- 欢迎语 ----------
      它是一条**真实消息**（进门就写进会话），不是一个凭空画上去的装饰：
      这样它也有索引、也能被复制/删除，不会变成"看得见但点不动"的幽灵。 */
+  /* 开场白。它**永远留着** —— 包括接上 API 之后（作者特意要求：
+     这段话的排版是"高级感"的来源，去掉就掉档次了）。
+     演示模式下的内容按作者给的原文；接上模型之后只把"演示模式"那段换掉，
+     骨架和语气保持一样。
+
+     它带 greet: true 标记，有三个作用：
+       1. 渲染时带上「Ventana」那个大标题
+       2. **不进发给模型的历史**（它不是角色说的话，进历史会让模型以为
+          自己刚说过一句自我介绍，还会白白占 token）
+       3. **不挂复制/删除/重新生成按钮**（作者要求：开场白下面不要那三个键） */
   function welcomeText() {
-    return '你好，我是 **Ventana** —— 住在这台手机里的一个小房间。\n\n'
-      + (apiConfigured()
-          ? '已经接上真实模型了，随时可以开始。'
-          : '现在还没有连上模型，我说的话来自 App 内置的示例 —— 不是真的角色。'
-            + '点顶栏那枚齿轮填好接口、Key 和模型名，我就会换成真的。');
+    if (apiConfigured()) {
+      return '你好，我是 **Ventana** —— 住在这台手机里的一个小窗口。\n\n'
+        + '已经接上模型了，随时可以开始。\n\n'
+        + '想换个性格，可以在连接设置里写「系统提示词」，\n'
+        + '也可以往「资料库」里放几份文档 —— 我聊到相关的事会自己去读。';
+    }
+    return '你好，我是 **Ventana** —— 住在这台手机里的一个小窗口。\n\n'
+      + '现在还是演示模式：我正用内置回复跟你说话。\n\n'
+      + '如果想让我真的开口：\n'
+      + '1. 点右上角那枚齿轮\n'
+      + '2. 在连接设置中填好接口地址、API Key 和模型名\n'
+      + '3. 点「试一试」确认能通，再点「保存」\n\n'
+      + '然后我们就能真的聊起来。';
   }
   /** 只在空会话时种下欢迎语。**自己负责渲染**，调用方不要再调 restoreLog */
   function welcome() {

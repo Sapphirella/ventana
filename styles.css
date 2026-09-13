@@ -84,17 +84,19 @@
   .row { width: 100%; max-width: 720px; margin: 0 auto; display: flex; }
   .row.me { justify-content: flex-end; }
   .row.sys { justify-content: center; }
-  /* 竖排容器：气泡/文字 + 下面那排小图标 */
+  /* 竖排容器：气泡/文字 + 下面那排小图标。
+     ★ 顺序要求：这一块必须写在 .acts 的规则**之前**都没关系，
+       但**不要再在别处**追加 .row .col / .row.me .col 的覆盖规则 ——
+       之前就是三处零散规则互相盖，量出来 .col 宽度只有 61px、
+       气泡被压成"每字一行"，很难看出是谁盖了谁。 */
   .row .col { flex: 1 1 auto; min-width: 0; max-width: 100%; min-height: 0;
-    display: flex; flex-direction: column; align-items: flex-start; }
-  /* 我方整体靠右：**只**让气泡自己 align-self: flex-end，
-     不要把 .col 设成 align-items: flex-end —— 那样图标排的负外边距会被
-     对齐计算吃掉，图标会偏出气泡左缘 10px（实测如此）。 */
-  .row.me .col { flex: 0 1 auto; }
+    position: relative;
+    display: flex; flex-direction: column; align-items: flex-start;
+    /* 给下面那排图标留高度：30px 按钮 + 8px 间距 */
+    padding-bottom: 38px; }
   .row .body { min-width: 0; max-width: 100%; }
-  /* 我方气泡宽度按内容收缩；对方文字占满 */
+  /* 我方：气泡自己靠右（容器不设 flex-end，否则图标排会被对齐计算吃住） */
   .row.me .body { flex: 0 1 auto; align-self: flex-end; max-width: 100%; }
-  .row.me .col { align-items: stretch; }   /* 让 .acts 的 width:100% 等于气泡宽度 */
 
   .bubble {
     background: var(--me-bg); border: 1px solid var(--me-line);
@@ -170,17 +172,21 @@
        · 我方那条：图标从气泡**左缘**开始排 —— 不是贴着屏幕右边，
          也不是气泡右缘。整排比气泡窄，视觉上就"挂在气泡下面"。
      所以两边都是 flex-start，靠 .row.me 上的内边距把整行推进气泡的范围里。 */
+  /* 一排图标。**永远横向**（nowrap）——
+     之前用 wrap，短消息时气泡窄，三个 30px 的按钮塞不下就折成竖排（用户反馈过）。 */
   .acts {
-    /* width:100% 是关键：我方气泡和 .col 等宽时，图标排要真正从气泡**左缘**开始，
-       不给 100% 的话它会跟着 align-items:flex-end 跑到右边去（用户明确说不要那样）。
-       图标仍然在气泡下方，因为 .col 是竖排。 */
-    width: 100%;
-    display: flex; gap: 0; flex-wrap: wrap; justify-content: flex-start;
-    /* 往左收 10px：让**图标本体**的左缘与气泡/文字的左缘齐平。
-       这会让按钮的点击区比 .col 左出 10px，所以窄屏上要确认没有横向滚动
-       （mobile.mjs 的「横向溢出」一组守着这件事）。 */
-    margin: 0 0 0 -10px;
+    position: absolute; bottom: 0;
+    display: flex; gap: 0; flex-wrap: nowrap;
+    /* 对方：贴在整段话的**左**下角。用 left:-10px 把按钮的左内边距抵消掉，
+       这样是**图标本体**的左缘与文字左缘齐平（用 margin 只能移动整个盒子，
+       改不了"图标在按钮内部还偏 10px"这件事 —— 试过）。 */
+    left: -10px; right: auto; justify-content: flex-start;
   }
+  /* 我方：贴在气泡的**右**下角。
+     用 right:-10px 而不是 right:0：要抵消的是**最右边那个按钮**自己的右内边距，
+     只抵消容器是没用的（试过 right:0 和 right:10px，图标都还差 10~56px）——
+     "图标在按钮内部还偏 10px"这件事只能靠反方向的偏移来抵消。 */
+  .row.me .acts { left: auto; right: -10px; justify-content: flex-end; }
   .act {
     /* 图标本体 15px，但按钮做到 36×36 —— 视觉上稀疏，手指上够用。
        手机端触摸目标小于 36px 基本按不准（这条在 README 的界面约定里）。 */

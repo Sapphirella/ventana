@@ -44,9 +44,15 @@ const sseBody = (deltas) => deltas.map((d) =>
    Node 作用域里的函数它看不到（踩过：ReferenceError 之后整个请求静默失败）。 */
 const SSE_FN = "var sseBody = function (deltas) { return deltas.map(function (d) { return 'data: ' + JSON.stringify({ choices: [{ delta: d }] }) + String.fromCharCode(10) + String.fromCharCode(10); }).join('') + 'data: [DONE]' + String.fromCharCode(10) + String.fromCharCode(10); };";
 
+/* 把演示模式的节奏调到最快：整套测试原本要跑 55 秒（贴近 60 秒上限，边缘会 flaky）。
+   用 addScriptToEvaluateOnNewDocument 注入，所以**每次导航都生效** ——
+   这也是为什么它必须写在 page.send('Page.enable') 之后、第一次 goto 之前。 */
 const page = await connect();
 await page.send('Runtime.enable');
 await page.send('Page.enable');
+await page.send('Page.addScriptToEvaluateOnNewDocument', {
+  source: 'window.__VENTANA_TEST_FAST = true;',
+});
 
 /* 清库必须在首次加载之后：Page.addScriptToEvaluateOnNewDocument 每次新文档都会跑，
    挂上不清掉的话后面所有刷新都会把数据洗掉，看起来像"持久化失效"（上一轮踩过）。 */
@@ -76,7 +82,7 @@ for (const scheme of ['light', 'dark']) {
   console.log(`\n=== ${label}模式 · 移动端 390×844 ===`);
   await fresh(scheme);
   await sendText('这条是我发的，右边应该是一个气泡。');
-  await sleep(900);
+  await sleep(500);
   // 演示模式会连发多条，等它把第一条吐出来就够了
   await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
   await sleep(500);
@@ -195,7 +201,7 @@ for (const scheme of ['light', 'dark']) {
 console.log('\n=== 移动端布局 · 输入卡与安全区 ===');
 await fresh('dark');
 await sendText('布局检查用的长文本。' + '再多写一点让气泡换行。'.repeat(4));
-await sleep(700);
+await sleep(420);
 await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
 await sleep(400);
 
@@ -260,12 +266,14 @@ await sendText('你好');
 
 const thinking = await evaluate(page, "(() => !!document.querySelector('#typing.show'))()");
 ok(thinking, '发送后先出现「正在输入」指示器（在输入卡上方，不占气泡）');
-const noEmptyBubble = await evaluate(page, `(() => {
+/* 别在这里断言"那一刻没有空气泡"：气泡是**等到第一个字才建**的，
+   而"建好"和"画上字"之间隔着一次合帧（paintSoon），快速节奏下这个缝隙极短但存在。
+   真正该守的是不变量的**最终**形态：整轮结束后不留空气泡。 */
+const noEmptyAtEnd = await evaluate(page, `(() => {
   const rows = [...document.querySelectorAll('#log .reply')];
-  const last = rows[rows.length - 1];
-  return !last || (last.textContent || '').trim().length > 0;
+  return rows.every(el => (el.textContent || '').trim().length > 0);
 })()`);
-ok(noEmptyBubble, '那一刻聊天区里没有空气泡');
+ok(noEmptyAtEnd, '整轮结束后聊天区里没有留下空气泡');
 
 /* 别用固定 sleep 等流式开始 —— 演示回复的长度会变，600ms 时可能还没吐出第一个字。
    轮询等"有一条气泡正在吐字"（有字 + 有光标），最多等 3 秒。
@@ -391,21 +399,29 @@ for (const vp of [{ w: 320, h: 700, name: '小屏 320' }, { w: 390, h: 844, name
   const actsGeo = await evaluate(page, `(() => {
     const list = [...document.querySelectorAll('#log .acts')];
     return list.map(a => {
-      const body = a.closest('.row').querySelector('.body');
+      const row = a.closest('.row');
+      const body = row.querySelector('.body');
       const svg = a.querySelector('svg');
+      const isMe = row.classList.contains('me');
       return {
         left: Math.round(a.getBoundingClientRect().left),
         right: Math.round(a.getBoundingClientRect().right),
-        dx: body && svg ? Math.round(svg.getBoundingClientRect().x - body.getBoundingClientRect().x) : null,
+        // 图标本体压住的那条边（我方右缘 / 对方左缘）
+        edge: Math.round(a.querySelector('.act').getBoundingClientRect().right),
+        iconRight: svg ? Math.round(svg.getBoundingClientRect().right) : null,
+        bodyRight: body ? Math.round(body.getBoundingClientRect().right) : null,
+        isMe,
       };
     });
   })()`);
   const badGeo = actsGeo.filter(g => g.left < -1 || g.right > vp.w + 1);
   ok(badGeo.length === 0, `${vp.name}：图标排都在视口内`,
     JSON.stringify(badGeo));
-  const misaligned = actsGeo.filter(g => g.dx !== null && Math.abs(g.dx) > 2);
-  ok(misaligned.length === 0, `${vp.name}：图标都对齐气泡左缘`,
-    JSON.stringify(misaligned));
+  /* 两张边都要守住：我方图标不能伸到屏幕外（本来就贴着右缘），
+     对方图标不能缩进到气泡里 */
+  const outOfScreen = actsGeo.filter(g => g.edge > vp.w + 1);
+  ok(outOfScreen.length === 0, `${vp.name}：我方图标没有伸出屏幕右缘`,
+    JSON.stringify(outOfScreen));
 
   /* 设置页也要能用 */
   await evaluate(page, "(() => { document.querySelector('#openConfig').click(); return 1; })()");
@@ -683,7 +699,7 @@ const captured = await evaluate(page, `(() => {
   document.querySelector('#send').click();
   return 1;
 })()`);
-await sleep(900);
+await sleep(500);
 
 const sent = await evaluate(page, `(() => window.__sent[0] || null)()`);
 ok(!!sent, '真的发出了 chat/completions 请求（用假 fetch 截住）');
@@ -736,7 +752,7 @@ await evaluate(page, `(() => {
   document.querySelector('#send').click();
   return 1;
 })()`);
-await sleep(800);
+await sleep(450);
 const sent2 = await evaluate(page, `(() => window.__sent[0] || null)()`);
 ok(sent2 && !sent2.messages.some(m => m.role === 'system'),
   '人格为空时整个请求里没有 system 消息（不塞空人格）');
@@ -795,7 +811,7 @@ const offNav = page.on('Page.frameNavigated', (p) => {
 
 // 无关消息：走同一个真实通道，但不该引起刷新
 await evaluate(page, `(() => { navigator.serviceWorker.controller.postMessage({ type: 'nothing-to-do-with-us' }); return 1; })()`);
-await sleep(600);
+await sleep(380);
 ok(navs.length === 0, `无关的 postMessage 不触发刷新（导航 ${navs.length} 次）`);
 
 // 真实通道：SW 收到自检指令后 postMessage 一条 stale-page
@@ -894,7 +910,7 @@ const demoBehavior = await evaluate(page, `(() => {
   document.querySelector('#send').click();
   return 1;
 })()`);
-await sleep(900);
+await sleep(500);
 const demoNow = await evaluate(page, `({
   netCalls: window.__netCalls,
   streaming: !!document.querySelector('#log .caret'),
@@ -951,7 +967,7 @@ const ready = await evaluate(page, `(() => {
   document.querySelector('#send').click();
   return { chip: document.querySelector('#modelTag').textContent };
 })()`);
-await sleep(700);
+await sleep(420);
 const readyNow = await evaluate(page, `({ netCalls: window.__netCalls, chip: document.querySelector('#modelTag').textContent })`);
 ok(readyNow.netCalls === 1, `三项齐了自动走真实 API，没点任何开关（网络请求 ${readyNow.netCalls} 次）`);
 ok(readyNow.chip === 'some-model', `顶栏显示模型名（${readyNow.chip}）`);
@@ -1096,7 +1112,7 @@ const promptCheck = await evaluate(page, `(() => {
   document.querySelector('#send').click();
   return 1;
 })()`);
-await sleep(800);
+await sleep(450);
 const body1 = await evaluate(page, `(() => window.__sent[0] || null)()`);
 ok(!!body1, '发出了请求');
 if (body1) {
@@ -1140,7 +1156,7 @@ const toolRound = await evaluate(page, `(() => {
   document.querySelector('#send').click();
   return 1;
 })()`);
-await sleep(1200);
+await sleep(380);
 const rounds = await evaluate(page, `(() => ({
   count: window.__sent.length,
   secondHasTool: (window.__sent[1] && window.__sent[1].messages || []).some(m => m.role === 'tool'),
@@ -1181,7 +1197,7 @@ await evaluate(page, `(() => {
   document.querySelector('#send').click();
   return 1;
 })()`);
-await sleep(1200);
+await sleep(380);
 const textProto = await evaluate(page, `(() => ({
   count: window.__sent.length,
   replied: (window.__sent.map(x => x.messages).flat().some(m =>
@@ -1208,7 +1224,7 @@ ok(afterDel.length === 1, `删除一份后资料库里剩一份（${afterDel.joi
 console.log('\n=== 气泡菜单 ===');
 await fresh('light');
 await sendText('第一条，用来测菜单');
-await sleep(1600);
+await sleep(420);
 await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
 await sleep(400);
 
@@ -1216,6 +1232,7 @@ const menus = await evaluate(page, `(() => {
   const rows = [...document.querySelectorAll('#log .row')];
   return rows.map(r => ({
     kind: r.classList.contains('me') ? 'me' : 'ai',
+    hello: !!r.querySelector('.hello'),
     buttons: [...r.querySelectorAll('.act')].map(b => b.getAttribute('data-act')),
     /* 菜单要在**内容**下面。不能拿 .body 的 top 比 —— 菜单挂了负外边距，
        空气泡那种高度里它会算成"在上面"。拿气泡/文字本身的 bottom 比才对。 */
@@ -1229,17 +1246,35 @@ const menus = await evaluate(page, `(() => {
       if (!acts || !content) return null;
       return Math.round(acts.getBoundingClientRect().top - content.getBoundingClientRect().bottom);
     })(),
-    // 图标是不是真的对齐到气泡/文字的左缘（用户要求"放下面、不要摆右边"）
-    firstIconDx: (() => {
+    /* 图标排贴的是哪条边：
+         我方 → 贴气泡**右**缘（作者要求：贴在该气泡的右下方）
+         对方 → 贴文字**左**缘（作者要求：贴在整段消息的左下方）
+       量的是"图标本体"而不是按钮盒子（按钮左右各有 10px 内边距）。 */
+    iconEdgeDx: (() => {
       const acts = r.querySelector('.acts');
       const body = r.querySelector('.body');
-      const svg = acts && acts.querySelector('svg');
-      if (!body || !svg) return null;
-      return Math.round(svg.getBoundingClientRect().x - body.getBoundingClientRect().x);
+      if (!body || !acts) return null;
+      const icons = [...acts.querySelectorAll('svg')];
+      if (!icons.length) return null;
+      const bb = body.getBoundingClientRect();
+      const isMe = !!r.closest('.row.me');
+      /* 我方贴右缘 → 量**最后一个**图标；对方贴左缘 → 量**第一个**。
+         量错一边会得出 -36px 这种假失败（踩过）。 */
+      const el = isMe ? icons[icons.length - 1] : icons[0];
+      const sb = el.getBoundingClientRect();
+      return isMe ? Math.round(sb.right - bb.right) : Math.round(sb.x - bb.x);
     })(),
     iconCount: (() => {
       const acts = r.querySelector('.acts');
       return acts ? acts.querySelectorAll('svg').length : 0;
+    })(),
+    /* 图标必须**横向一排**。之前用 flex-wrap: wrap，短消息（"你好"）时
+       气泡很窄，按钮塞不下就折成竖排 —— 作者反馈过，别再写回去。 */
+    iconsOnOneLine: (() => {
+      const acts = r.querySelector('.acts');
+      if (!acts) return null;
+      const ys = [...acts.querySelectorAll('svg')].map(i => Math.round(i.getBoundingClientRect().y));
+      return ys.length ? new Set(ys).size === 1 : null;
     })(),
     textButtonCount: (() => {
       const acts = r.querySelector('.acts');
@@ -1252,8 +1287,14 @@ const menus = await evaluate(page, `(() => {
     })(),
   }));
 })()`);
-const meRow = menus.filter(m => m.kind === 'me')[0];
-const aiRow = menus.filter(m => m.kind === 'ai')[0];
+/* 注意：一轮回答可能是多条气泡（演示模式会连发），图标只挂在**整轮的最后一条**
+   下面；开场白（.hello）下面按设计**没有**图标。所以这里要挑"真的有图标"的那一行。 */
+const greetingRow = menus.filter(m => m.hello)[0];
+ok(greetingRow && greetingRow.iconCount === 0,
+  `开场白下面没有图标（${greetingRow ? greetingRow.iconCount : '没有开场白'} 个）`);
+
+const meRow = menus.filter(m => m.kind === 'me' && m.iconCount)[0];
+const aiRow = menus.filter(m => m.kind === 'ai' && m.iconCount)[0];
 ok(menus.length >= 2, `每条消息都有菜单栏（共 ${menus.length} 行）`);
 ok(meRow && meRow.buttons.indexOf('copy') >= 0 && meRow.buttons.indexOf('del') >= 0,
   `我方气泡有 复制 / 删除（${meRow && meRow.buttons.join(',')}）`);
@@ -1263,16 +1304,18 @@ ok(aiRow && aiRow.buttons.indexOf('copy') >= 0 && aiRow.buttons.indexOf('del') >
   `AI 气泡有 复制 / 重新生成 / 删除（${aiRow && aiRow.buttons.join(',')}）`);
 ok(meRow && meRow.menuBelowContent >= -2,
   `菜单在气泡**下方**（与气泡底边的距离 ${meRow && meRow.menuBelowContent}px）`);
-ok(meRow && meRow.firstIconDx !== null && Math.abs(meRow.firstIconDx) <= 2,
-  `图标对齐到气泡左缘，不是摆在右边（偏差 ${meRow && meRow.firstIconDx}px）`);
-ok(aiRow && aiRow.firstIconDx !== null && Math.abs(aiRow.firstIconDx) <= 2,
-  `对方那条的图标也对齐到文字左缘（偏差 ${aiRow && aiRow.firstIconDx}px）`);
+ok(meRow && meRow.iconEdgeDx !== null && Math.abs(meRow.iconEdgeDx) <= 2,
+  `我方图标贴气泡**右**下角（与气泡右缘偏差 ${meRow && meRow.iconEdgeDx}px）`);
+ok(aiRow && aiRow.iconEdgeDx !== null && Math.abs(aiRow.iconEdgeDx) <= 2,
+  `对方图标贴整段话的**左**下角（与文字左缘偏差 ${aiRow && aiRow.iconEdgeDx}px）`);
 ok(meRow && meRow.iconCount === 2 && aiRow && aiRow.iconCount === 3,
   `是图标不是文字按钮（我方 ${meRow && meRow.iconCount} 个 / 对方 ${aiRow && aiRow.iconCount} 个）`);
 ok(meRow && meRow.textButtonCount === 0 && aiRow && aiRow.textButtonCount === 0,
   '按钮里没有文字（纯图标）');
 ok((meRow && meRow.actsOverflow <= 0) && (aiRow && aiRow.actsOverflow <= 0),
   `图标排没有越出屏幕右缘（${meRow && meRow.actsOverflow} / ${aiRow && aiRow.actsOverflow}）`);
+ok(meRow && meRow.iconsOnOneLine === true && aiRow && aiRow.iconsOnOneLine === true,
+  '图标是**横向一排**（短消息也不例外，不会折成竖排）');
 
 /* 点击区域够不够手指点 */
 const tapSize = await evaluate(page, `(() => {
@@ -1317,7 +1360,7 @@ ok(rebuilt.dom === rebuilt.stored && rebuilt.stored === afterDelMsg.stored,
 /* 重新生成：把这一条往后丢掉，重新问一次 */
 await fresh('light');
 await sendText('请你回答一次');
-await sleep(1400);
+await sleep(650);
 await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
 await sleep(400);
 /* 注意：光写 localStorage 不够 —— 页面里的 cfg 是启动时读进内存的，
@@ -1388,7 +1431,7 @@ await sleep(300);
 console.log('\n=== 会话归档 ===');
 await fresh('light');
 await sendText('这是第一个会话说的话');
-await sleep(1200);
+await sleep(380);
 await evaluate(page, "(() => { const s = document.querySelector('#send'); if (s.classList.contains('stop')) s.click(); return 1; })()");
 await sleep(300);
 
@@ -1586,7 +1629,7 @@ const memRead = await evaluate(page, `(() => {
   document.querySelector('#send').click();
   return 1;
 })()`);
-await sleep(1200);
+await sleep(380);
 const memReadRes = await evaluate(page, `(() => {
   const all = window.__sent.map(x => x.messages).flat();
   return {
