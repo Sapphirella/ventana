@@ -1,4 +1,4 @@
-  var VERSION = 'v0.15';
+  var VERSION = 'v0.16';
   var $ = function (s) { return document.querySelector(s); };
   var logEl = $('#log'), box = $('#box'), sendBtn = $('#send');
 
@@ -327,7 +327,11 @@
   function persistSync(sync) {
     try { localStorage.setItem(K_SYNC, JSON.stringify(sync)); } catch (e) {}
   }
+  /* 记下"人格/资料库变过，下一轮要全量下发一次"。
+     演示模式下不记 —— 那时候根本不会发请求，记了只会留个标记，
+     等用户接上 API 后第一条消息突然全量下发一次，让人意外。 */
   function noteSourceChange(kind) {
+    if (!apiConfigured()) return;
     var s = loadSync();
     s[kind] = true;
     persistSync(s);
@@ -341,15 +345,24 @@
       return '《' + (d.name || '未命名') + '》：\n' + (d.text || '');
     }).join('\n\n');
   }
+  /* 本次构建有没有把"更新后的完整内容"发出去。由 runApi 在**请求成功之后**
+     才调 markSyncSent() 清标记 —— 不在构建阶段清。
+     为什么：构建完就清的话，那一轮请求若失败（断网/401/被中断），
+     通知就永久丢了，模型再也收不到"内容变了"。 */
+  var syncSentNow = false;
+
   function buildMessages(list) {
     var parts = [];
     var sync = loadSync();
+    syncSentNow = false;
+
     var sys = (persona.text || '').trim();
     if (sys) {
       parts.push(sync.prompt
         ? '【系统提示词刚刚更新】以下是当前系统提示词的完整内容，请以此为准：\n\n' + sys
         : sys);
     }
+
     var di = docIndexText();
     if (di) {
       if (sync.docs) {
@@ -358,12 +371,26 @@
       } else {
         parts.push(di);
       }
+    } else if (sync.docs) {
+      /* ★ 资料库被删空的情况：原来这里整个被 if (di) 跳过，
+         然后标记又被 clearSync() 清掉 —— 用户"删掉全部文档"这个意图
+         就此消失，模型还按旧印象以为有资料可用。
+         现在如实说一句"已经没有了"。 */
+      parts.push('【资料库刚刚更新】资料库现在是空的：之前给你的那些文档已经全部删除，'
+        + '不要再引用它们的内容。有需要时可以先问主人要新的资料。');
     }
+    if (sync.prompt || sync.docs) syncSentNow = true;
+
     var mi = memoryIndexText();
     if (mi) parts.push(mi);
-    if (sync.prompt || sync.docs) clearSync();   // 全量只消费一次
+
     if (!parts.length) return list;
     return [{ role: 'system', content: parts.join('\n\n') }].concat(list);
+  }
+
+  /** 请求真的成功了才清"待同步"标记 */
+  function markSyncSent() {
+    if (syncSentNow) { clearSync(); syncSentNow = false; }
   }
 
   /* ---------- 消息区 ----------
@@ -1185,6 +1212,7 @@
         appendDelta(bubbleFor(), t);
       }, abortCtrl.signal)
         .then(function (res) {
+          markSyncSent();     // 请求真的通了，才允许丢掉"待同步"标记（失败时留着下轮再发）
           var body = res.text || '';
           var calls = (res.calls || []).filter(function (c) { return c && c.name; });
 
@@ -2011,19 +2039,6 @@
       toast('已删除');
     }
   });
-
-  /* 切换会话：把当前会话换成指定 id（归档里的也可以，会被拉回活跃） */
-  function switchTo(convId) {
-    var c = store.convs.filter(function (x) { return x.id === convId; })[0];
-    if (!c) return;
-    c.archived = false;
-    store.activeId = c.id;
-    current = c;
-    saveStore();
-    restoreLog();
-    if (!msgs().length) welcome();
-    scrollLog();
-  }
 
   /* ============================================================
      资料库（技能文档）：只存本地 + 只给索引，按需读取

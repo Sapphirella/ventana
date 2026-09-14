@@ -13,7 +13,7 @@
  * 另外 CACHE 里的版本要和 index.html 的 VERSION 保持一致：
  * index.html 用 `sw.js?v=<VERSION>` 注册，浏览器按 URL 判断"是不是新的 Service Worker"。
  */
-var VERSION = 'v0.15';
+var VERSION = 'v0.16';
 var CACHE = 'ventana-' + VERSION;
 var CORE = [
   './',

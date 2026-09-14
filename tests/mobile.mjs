@@ -2207,6 +2207,149 @@ ok(migrated2.domRows === 2, `迁移后的聊天记录照常显示（${migrated2.
 ok(migrated2.hasMenus >= 5,
   `迁移出来的消息也带菜单（${migrated2.hasMenus} 个按钮 / 2 条消息）`);
 
+/* ============================================================
+   十六、两个 review 出来的 bug 的回归测试
+   ============================================================ */
+console.log('\n=== 顶栏文字截断 / 全量同步的边界 ===');
+
+/* Bug 1：模型名长了会压到右边那排按钮上。
+   根因：.chip 的 overflow/ellipsis 只管胶囊自己的盒子，管不到里面的 span；
+   span 照内容宽度长（deepseek-chat 就 257px），直接压住导出按钮。
+   所以必须给 #modelTag 自己设截断。这组在多个宽度 × 多个模型名下守。 */
+for (const [vpw, model] of [[320, 'deepseek-chat-very-long-model-name-2024'],
+                            [390, 'deepseek-chat'],
+                            [390, 'm'],
+                            [414, 'gpt-4o-mini']]) {
+  await emulateMobile(page, { width: vpw, height: 844, dpr: 2 });
+  await goto(page, URL_);
+  await evaluate(page, `(() => { try { localStorage.clear(); } catch (e) {}
+    localStorage.setItem('ventana.cfg', JSON.stringify({ base: 'https://example.com/v1', key: 'sk', model: ${JSON.stringify(model)} }));
+    return 1; })()`);
+  await goto(page, URL_);
+  await sleep(300);
+  const bar = await evaluate(page, `(() => {
+    const tag = document.querySelector('#modelTag');
+    const tb = tag.getBoundingClientRect();
+    const btns = [...document.querySelectorAll('#viewChat .topbar .iconbtn')]
+      .map(el => ({ id: el.id, x: Math.round(el.getBoundingClientRect().x) }));
+    const firstBtn = btns.reduce((a, b) => (b.x < a.x ? b : a), btns[0]);
+    return {
+      tagRight: Math.round(tb.right),
+      firstBtnX: firstBtn.x,
+      overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      ellipsis: getComputedStyle(tag).textOverflow,
+      tagW: Math.round(tb.width),
+    };
+  })()`);
+  ok(bar.tagRight <= bar.firstBtnX,
+    `${vpw}px / ${model.slice(0, 16)}：模型名没有压到按钮（文字右缘 ${bar.tagRight} ≤ 按钮 ${bar.firstBtnX}）`);
+  ok(bar.ellipsis === 'ellipsis', `${vpw}px / ${model.slice(0, 16)}：文字带省略号截断`);
+  ok(bar.overflowX <= 1, `${vpw}px / ${model.slice(0, 16)}：顶栏没有横向溢出`);
+}
+/* 长模型名也不该把按钮挤出屏幕 */
+const btnReachable = await evaluate(page, `(() => {
+  const btns = [...document.querySelectorAll('#viewChat .topbar .iconbtn')];
+  return btns.every(b => {
+    const r = b.getBoundingClientRect();
+    const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+    return r.right <= innerWidth + 1 && !!(top && (top === b || b.contains(top)));
+  });
+})()`);
+ok(btnReachable, '顶栏每个按钮都在屏幕内、且点击目标没被文字盖住');
+
+/* Bug 2：把资料库删空之后，全量同步的"通知"整条消失。
+   原来：docIndexText() 返回空串 → if (di) 整段跳过 → 但标记照样被清掉，
+   结果请求里连 system 消息都没有，模型还按旧索引以为有资料。 */
+await fresh('light');
+await evaluate(page, `(() => {
+  localStorage.setItem('ventana.cfg', JSON.stringify({ base: 'https://example.com/v1', key: 'sk', model: 'm' }));
+  localStorage.setItem('ventana.docs', JSON.stringify([]));
+  localStorage.setItem('ventana.sync', JSON.stringify({ prompt: false, docs: true }));
+  return 1;
+})()`);
+await goto(page, URL_);
+await sleep(300);
+await evaluate(page, `(() => {
+  window.__sent = [];
+  ${SSE_FN}
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') >= 0) {
+      window.__sent.push(JSON.parse(init.body));
+      return Promise.resolve(new Response(sseBody([{ content: '好的' }]),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+    }
+    return realFetch.apply(this, arguments);
+  };
+  const b = document.querySelector('#box');
+  b.value = '资料还在吗'; b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(700);
+const emptyLib = await evaluate(page, `(() => {
+  const body = window.__sent[0] || { messages: [] };
+  const sys = (body.messages.find(m => m.role === 'system') || {}).content || '';
+  return { hasSystem: body.messages.some(m => m.role === 'system'), sys,
+           syncLeft: localStorage.getItem('ventana.sync') };
+})()`);
+ok(emptyLib.hasSystem, '资料库删空后仍然发出 system 消息（不再整条丢失）');
+ok(emptyLib.sys.indexOf('空的') >= 0 && emptyLib.sys.indexOf('已经全部删除') >= 0,
+  `system 里如实说明资料库已空（${emptyLib.sys.slice(0, 40)}…）`);
+ok(emptyLib.syncLeft === null, '请求成功后清掉待同步标记');
+
+/* 请求失败时标记要留着 —— 否则那一轮失败，模型永远收不到"内容变了" */
+await fresh('light');
+await evaluate(page, `(() => {
+  localStorage.setItem('ventana.cfg', JSON.stringify({ base: 'https://example.com/v1', key: 'sk', model: 'm' }));
+  localStorage.setItem('ventana.docs', JSON.stringify([{ id: 'd1', name: '文档.md', text: '内容', at: 1 }]));
+  localStorage.setItem('ventana.sync', JSON.stringify({ prompt: false, docs: true }));
+  return 1;
+})()`);
+await goto(page, URL_);
+await sleep(300);
+await evaluate(page, `(() => {
+  const realFetch = window.fetch;
+  window.fetch = function (url, init) {
+    if (String(url).indexOf('chat/completions') >= 0) {
+      // 模拟断网 / 401：直接抛
+      return Promise.reject(new Error('network down'));
+    }
+    return realFetch.apply(this, arguments);
+  };
+  const b = document.querySelector('#box');
+  b.value = '第一轮就失败'; b.dispatchEvent(new Event('input'));
+  document.querySelector('#send').click();
+  return 1;
+})()`);
+await sleep(700);
+const afterFail = await evaluate(page, `(() => ({
+  syncLeft: localStorage.getItem('ventana.sync'),
+  errShown: document.querySelector('#log .reply.err') ? document.querySelector('#log .reply.err').textContent : '',
+}))()`);
+ok(afterFail.syncLeft !== null, '请求失败时"待同步"标记留着（下一轮还会全量下发）');
+ok(afterFail.errShown.length > 0, `失败有可见提示（${afterFail.errShown.slice(0, 24)}）`);
+
+/* 演示模式下不记待同步标记（免得接上 API 后第一条消息突然全量下发） */
+await fresh('light');
+await evaluate(page, `(() => {
+  localStorage.removeItem('ventana.cfg');
+  localStorage.removeItem('ventana.sync');
+  return 1;
+})()`);
+await goto(page, URL_);
+await sleep(300);
+await evaluate(page, `(() => {
+  document.querySelector('#openConfig').click();
+  const ta = document.querySelector('#cfgPrompt');
+  ta.value = '演示模式下改的人格';
+  document.querySelector('#promptSave').click();
+  return 1;
+})()`);
+await sleep(300);
+const demoNoSync = await evaluate(page, `localStorage.getItem('ventana.sync')`);
+ok(demoNoSync === null, '演示模式下改人格不记待同步标记');
+
 console.log(`\n结果：${pass} 项通过，${fail} 项失败`);
 console.log(`截图：${OUT}/mobile-light.png, mobile-dark.png`);
 await page.close();

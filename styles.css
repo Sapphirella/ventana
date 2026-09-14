@@ -61,11 +61,19 @@
   .iconbtn svg { width: 21px; height: 21px; }
   .spacer { flex: none; width: 40px; }
   /* 顶栏上的"现在接的是谁"小胶囊：一眼看出演示模式还是真模型 */
+  /* 顶栏胶囊。★ 里面的文字必须自己被截断：
+     .chip 上的 overflow/ellipsis 只管胶囊**自己**的盒子，管不到子元素 ——
+     span 会照着自己的内容宽度长（模型名 deepseek-chat 就 257px），
+     直接压到右边那排按钮上（实测压住 9px）。所以给 #modelTag 单独设一次。 */
   .chip {
     display: flex; align-items: center; gap: 6px; max-width: 44vw;
     padding: 6px 11px; border: 1px solid var(--line); border-radius: 999px;
     background: var(--bg-2); font-size: 12px; color: var(--text-2);
-    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    overflow: hidden;
+  }
+  #modelTag {
+    min-width: 0; flex: 0 1 auto;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .chip .dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--text-2); }
   .chip.live .dot { background: var(--text); }
