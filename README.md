@@ -25,7 +25,7 @@
 | 对话 / 人格 / 文档 / 记忆全部持久化到 localStorage | 导出 / 备份（整包） |
 | 深浅两套主题跟随系统 | 主题手动切换、配色体系 |
 | 可安装 PWA（manifest + service worker 离线可用） | 图标与启动画面精修 |
-| 像素级自动化测试（292 项，见下文） | —— |
+| 像素级自动化测试（294 项，见下文） | —— |
 
 **方向已经调整**：原计划的"多角色 + 角色卡"**不做了**。
 现在只有一个对话对象，它的性格由「连接设置 → 系统提示词」决定。
@@ -72,7 +72,7 @@ ventana/
 └─ tests/
    ├─ cdp.mjs              零依赖 Chrome DevTools Protocol 客户端
    ├─ png.mjs              够用的小 PNG 解码器（读像素用，见下文）
-   ├─ mobile.mjs           移动端验收测试 292 项（像素 + 计算样式 + 交互 + 人格 + 资料库 + 记忆馆 + 归档 + 顶栏导出 + 内置浏览器导出面板 + 软键盘可见性 + 图标布局 + 缓存自愈 + 记忆馆感叹号 + 更新后全量下发 + 大文档按需截取）
+   ├─ mobile.mjs           移动端验收测试 294 项（像素 + 计算样式 + 交互 + 人格 + 资料库 + 记忆馆 + 归档 + 顶栏导出 + 内置浏览器导出面板 + 软键盘可见性 + 图标布局 + 缓存自愈 + 记忆馆感叹号 + 更新后全量下发 + 大文档按需截取）
    └─ shots.mjs            逐状态截图（日间/夜间各 7 个状态 + 桌面参考）
 ```
 
@@ -101,7 +101,7 @@ python3 ventana/serve.py
   --disable-backgrounding-occluded-windows --disable-renderer-backgrounding \
   --disable-background-timer-throttling --window-size=390,844 about:blank &
 
-# 3) 跑验收（292 项，约 46 秒）
+# 3) 跑验收（294 项，约 46 秒）
 node ventana/tests/mobile.mjs /tmp/ventana-shots
 
 # 4) 想肉眼核对画面，再跑一遍截图（日间/夜间各 7 个状态 + 一张桌面参考）

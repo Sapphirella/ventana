@@ -1137,6 +1137,21 @@ await sleep(400);
 const greetBack = await evaluate(page, `document.querySelector('#log .reply').innerText`);
 ok(greetBack.indexOf('演示模式') >= 0, '清除连接后开场白换回演示版');
 
+/* ★ 重开 App 之后开场白也必须是当前状态的版本。
+   踩过：refreshGreeting() 原来只在「保存/清除连接」时调用，
+   启动这条路径漏了 —— 于是接上 API 后用一阵子、重开 App，
+   开场白又变回"现在还是演示模式…"，看起来像连接没生效。 */
+await evaluate(page, `(() => {
+  localStorage.setItem('ventana.cfg', JSON.stringify({ base: 'https://example.com/v1', key: 'sk', model: 'm' }));
+  return 1;
+})()`);
+await goto(page, URL_);
+await sleep(400);
+const greetAfterReload = await evaluate(page, `document.querySelector('#log .reply').innerText`);
+ok(greetAfterReload.indexOf('已经接上模型') >= 0,
+  '重开 App 后开场白仍是"已连接"版（启动时也会刷新它）');
+ok(greetAfterReload.indexOf('演示模式') < 0, '重开后不再残留"演示模式"那段话');
+
 /* 开场白不进模型历史（它只是引导文案，占 token 还会误导模型） */
 const greetHistory = await evaluate(page, `(() => {
   window.__sent = [];

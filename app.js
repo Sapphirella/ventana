@@ -2108,6 +2108,12 @@
   loadDocs();
   loadMemories();
   loadPersona();
+  /* 开场白的文本是按"有没有接上模型"写出来的，而它落盘在会话里 ——
+     所以每次启动都要把已存的那条更新到当前状态，否则上次接上 API 之后
+     重开 App，开场白又变回"现在还是演示模式…"（refreshGreeting 只在
+     保存/清除连接时调用过，漏了启动这一条路径）。放在 restoreLog 之前，
+     渲染出来就是对的。 */
+  refreshGreeting();
   updateModelTag();
   syncComposer();
   renderMemNewBadge();
