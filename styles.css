@@ -1,5 +1,17 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
+    /* 顶部安全区（刘海/状态栏）。用 min() 封顶 30px ——
+       env(safe-area-inset-top) 在 iOS 上是可靠的（刘海 44~59px 或 0），
+       但国产 Android 浏览器（OPPO/Vivo/小米自带、夸克等）会返回各种怪值，
+       作者在 OPPO 内置浏览器上就撞到过：顶栏上方多出一块空白、顶栏被压矮。
+       封顶之后：真刘海机最多让出 30px（够用，因为状态栏通常 24~32px），
+       而异常的大值被钳住，不会再撑出一块空白。 */
+    /* 先给一个 0 的回退值：老内核（不认识 min()+env() 的）会丢掉后一行，
+       至少还有 0 可用 —— 不然变量会变成空值，顶栏内边距直接塌掉。 */
+    --sat: 0px;
+    --sab: 0px;
+    --sat: min(env(safe-area-inset-top, 0px), 30px);
+    --sab: min(env(safe-area-inset-bottom, 0px), 34px);
     --bg: #ffffff; --bg-2: #f4f4f4; --text: #111111; --text-2: #7a7a7a;
     --line: #e6e6e6; --accent-bg: #111111; --accent-fg: #ffffff;
     --caret: #111111; --err: #c62828;
@@ -47,9 +59,11 @@
   .topbar {
     flex: none; position: relative; z-index: 2;
     display: flex; align-items: center; gap: 10px;
-    padding: calc(env(safe-area-inset-top) + 10px) 14px 10px;
+    padding: calc(var(--sat) + 10px) 14px 10px;
     border-bottom: 1px solid var(--line); background: var(--bg);
-    min-height: 56px;
+    /* 高度用"内容撑开"而不是只写 min-height：某些旧 WebView 的 min-height
+       不含 padding，只写 min-height 时顶栏会显得比预期矮。 */
+    min-height: calc(var(--sat) + 46px);
   }
   .topbar .title { font-size: 17px; font-weight: 700; flex: 1; text-align: center; }
   .iconbtn {
@@ -97,11 +111,23 @@
        但**不要再在别处**追加 .row .col / .row.me .col 的覆盖规则 ——
        之前就是三处零散规则互相盖，量出来 .col 宽度只有 61px、
        气泡被压成"每字一行"，很难看出是谁盖了谁。 */
-  .row .col { flex: 1 1 auto; min-width: 0; max-width: 100%; min-height: 0;
+  /* ★ 用 flex: 0 1 auto，**不要** flex-grow。
+     原因：夸克等国产内核在"flex-grow 的 item + 内部 align-self"这种组合下，
+     会把 .col 的高度算成**整行高度**而不是内容高度 —— 表现是用户气泡下方
+     多出一大片空白（作者在夸克夜间模式下截图确认）。这是已知的
+     旧版 WebKit 高度计算差异，改 flex 值比跟它较劲便宜。
+     宽度上不需要它 grow：单行里只有 .col 一个 item，flex-basis:auto 已经会占满。 */
+  .row .col { flex: 0 1 auto; min-width: 0; max-width: 100%; min-height: 0;
     position: relative;
-    display: flex; flex-direction: column; align-items: flex-start;
-    /* 给下面那排图标留高度：30px 按钮 + 8px 间距 */
-    padding-bottom: 38px; }
+    display: flex; flex-direction: column; align-items: flex-start; }
+  /* ★ 只有**真的挂了图标排**的行才预留高度（30px 按钮 + 8px 间距）。
+     这里踩过一个很隐蔽的坑：原来是无条件 padding-bottom: 38px，
+     但一轮回复被拆成多条气泡时，图标只挂在**最后一条**下面 ——
+     于是前面每条都白留 38px。实测 6 条气泡里有 4 条白留，合计 152px
+     ≈ 5.2 行文字高（单行文字才 29px）。用户看到的就是"气泡之间占三行的大空行"，
+     而且它随气泡条数累积，越聊越明显。
+     注意别改用 JS 去改 padding：CSS 里写清楚"有没有图标排"这件事就够了。 */
+  .row .col.has-acts { padding-bottom: 38px; }
   .row .body { min-width: 0; max-width: 100%; }
   /* 我方：气泡自己靠右（容器不设 flex-end，否则图标排会被对齐计算吃住） */
   .row.me .body { flex: 0 1 auto; align-self: flex-end; max-width: 100%; }
@@ -183,7 +209,7 @@
   /* 一排图标。**永远横向**（nowrap）——
      之前用 wrap，短消息时气泡窄，三个 30px 的按钮塞不下就折成竖排（用户反馈过）。 */
   .acts {
-    position: absolute; bottom: 0;
+    position: absolute; bottom: 0;   /* 绝对定位：不参与 .col 的高度计算 */
     display: flex; gap: 0; flex-wrap: nowrap;
     /* 对方：贴在整段话的**左**下角。用 left:-10px 把按钮的左内边距抵消掉，
        这样是**图标本体**的左缘与文字左缘齐平（用 margin 只能移动整个盒子，
@@ -207,6 +233,10 @@
   }
   .act svg { width: 16px; height: 16px; display: block; flex: none; }
   .act:active { background: var(--bg-2); color: var(--text); }
+  /* 生成中：图标排的位置已经**预留**好了（.col.has-acts 撑着高度），
+     按钮本身完全隐形 —— 这样不会在说完的瞬间"跳"出一个图标排，
+     也不会让人去点一个还不能点的按钮。 */
+  .act:disabled { visibility: hidden; }
   .act.danger:active { color: var(--err); }
   /* 复制成功时短暂给个反馈（原来是改按钮文字，图标按钮没文字可改） */
   .act.done { color: var(--text); }
@@ -247,7 +277,7 @@
   /* ---------- 记忆馆 / 归档列表 ---------- */
   .listwrap {
     flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
-    padding: 16px 16px calc(24px + env(safe-area-inset-bottom));
+    padding: 16px 16px calc(24px + var(--sab));
   }
   .listwrap .inner { max-width: 620px; margin: 0 auto; }
   .empty-note {
@@ -310,11 +340,11 @@
   .drawer-wrap.open .drawer { transform: translateX(0); }
   .drawer-head {
     flex: none; display: flex; align-items: center; gap: 10px;
-    padding: calc(env(safe-area-inset-top) + 10px) 14px 10px;
-    border-bottom: 1px solid var(--line); min-height: 56px;
+    padding: calc(var(--sat) + 10px) 14px 10px;
+    border-bottom: 1px solid var(--line); min-height: calc(var(--sat) + 46px);
   }
   .drawer-head .title { font-size: 17px; font-weight: 700; flex: 1; text-align: center; }
-  .drawer .listwrap { flex: 1; padding: 4px 16px calc(20px + env(safe-area-inset-bottom)); }
+  .drawer .listwrap { flex: 1; padding: 4px 16px calc(20px + var(--sab)); }
   .drawer .empty-note { padding: 26px 8px; }
 
   /* ---------- 导出面板 ----------
@@ -322,7 +352,7 @@
      跳转出去必白屏。此面板把导出全文直接摊在页面里，复制即可拿走，不跳浏览器。 */
   .export-body {
     flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px;
-    padding: 14px 16px calc(20px + env(safe-area-inset-bottom));
+    padding: 14px 16px calc(20px + var(--sab));
   }
   .export-note {
     flex: none; font-size: 12.5px; line-height: 1.7; color: var(--text-2);
@@ -361,7 +391,7 @@
   #composerWrap {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
     display: flex; justify-content: center;
-    padding: 6px 12px calc(10px + env(safe-area-inset-bottom));
+    padding: 6px 12px calc(10px + var(--sab));
     background: linear-gradient(transparent, var(--bg) 38%);
   }
   .composer {
@@ -395,7 +425,7 @@
 
   /* ---------- 配置页 ---------- */
   .cfg { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
-    padding: 18px 16px calc(24px + env(safe-area-inset-bottom)); }
+    padding: 18px 16px calc(24px + var(--sab)); }
   .cfg-inner { max-width: 620px; margin: 0 auto; }
   /* 分组之间要拉开 —— 上一版各块挤在一起，"API 连接"和"系统提示词"
      看上去像同一个表单的一部分。现在用「大间距 + 细线 + 小节标题」分块。 */
@@ -497,7 +527,7 @@
 
   /* ---------- toast ---------- */
   #toast {
-    position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 26px);
+    position: fixed; left: 50%; bottom: calc(var(--sab) + 26px);
     transform: translateX(-50%) translateY(8px);
     background: var(--accent-bg); color: var(--accent-fg);
     padding: 9px 17px; border-radius: 999px; font-size: 13.5px;

@@ -1,4 +1,4 @@
-  var VERSION = 'v0.16';
+  var VERSION = 'v0.26';
   var $ = function (s) { return document.querySelector(s); };
   var logEl = $('#log'), box = $('#box'), sendBtn = $('#send');
 
@@ -502,6 +502,7 @@
       b.setAttribute('aria-label', ACT_LABEL[a] + '这条消息');
       b.title = ACT_LABEL[a];
       b.appendChild(actIcon(a));
+      b.disabled = true;      // 先禁用；整轮说完由 enableActions() 放开
       bar.appendChild(b);
     });
     bar._msgIndex = msgIndex;
@@ -520,9 +521,16 @@
       r.body.appendChild(th);
       r.body._thinking = th;
     } else if (text) {
-      r.body.textContent = text;
+      if (kind === 'me') appendPlainParas(r.body, text);
+      else r.body.textContent = text;
     }
     return r.body;
+  }
+
+  /** 放开某一行的图标（整轮回答结束后调用） */
+  function enableActions(body) {
+    if (!body || !body._acts) return;
+    [].forEach.call(body._acts.querySelectorAll('.act'), function (b) { b.disabled = false; });
   }
 
   /** 给一条已经落地的消息补上菜单栏（流式结束后调用） */
@@ -535,7 +543,11 @@
     var idx = body._msgIndex;
     if (idx === undefined || idx < 0) return;
     var bar = actionMenu(kind, idx);
+    // 默认是禁用态（流式中）。可点的场景由调用方调 enableActions() 放开 ——
+    // 千万别在这里无条件放开，否则"生成中不可点"就失效了（踩过）。
     body.parentNode.appendChild(bar);
+    // 标记这一行要预留图标排的高度（见 styles.css 的 .col.has-acts）
+    body.parentNode.classList.add('has-acts');
     body._acts = bar;
   }
 
@@ -625,6 +637,7 @@
   function addSystem(text) {
     var row = document.createElement('div');
     row.className = 'row sys';
+    row.setAttribute('data-keep', '1');   // 系统事件行：清扫时跳过
     var s = document.createElement('div');
     s.className = 'sysline';
     s.textContent = text;
@@ -641,6 +654,25 @@
       var ts = m.at || Date.now();
       if (!last || ts - last >= GAP_MS) addStamp(ts, !last);
       last = ts;
+
+      /* 一条 assistant 记录里可能存着**多条气泡**（用 BUBBLE_SEP 分隔）。
+         拆开还原成多条，刷新前后才是同一个样子 ——
+         不拆的话它们会挤成一条，段间距(10px)小于气泡间距(18px)，
+         用户看到的就是"刷新后空行被压缩了"。 */
+      if (m.role !== 'user' && !m.greet && m.content && m.content.indexOf(BUBBLE_SEP) >= 0) {
+        var parts = m.content.split(BUBBLE_SEP);
+        var lastEl = null;
+        parts.forEach(function (part) {
+          var el = addMsg('ai', '', false);
+          renderMarkdown(el, part);
+          el._msgIndex = i;
+          lastEl = el;
+        });
+        // 图标只挂在这一轮的**最后一条**气泡上（和实时一致）
+        if (lastEl) { attachActions(lastEl, 'ai'); enableActions(lastEl); }
+        return;
+      }
+
       var b;
       if (m.role === 'user') {
         b = addMsg('me', m.content);
@@ -656,7 +688,10 @@
         renderMarkdown(b, m.content || '');
       }
       b._msgIndex = i;
-      if (!m.greet) attachActions(b, m.role === 'user' ? 'me' : 'ai');
+      if (!m.greet) {
+        attachActions(b, m.role === 'user' ? 'me' : 'ai');
+        enableActions(b);      // 历史消息立刻可操作
+      }
     });
   }
   // 会话数据由启动段的 loadStore() 装载（见文件末尾「启动」一节）
@@ -675,8 +710,17 @@
   /* 输入卡是 fixed 的，高度随字数变化（最多 5 行）；把它写进 CSS 变量，
      消息区的下内边距跟着走，最后一条永远不被输入卡压住。 */
   var composerWrap = $('#composerWrap');
+  /* 把输入卡实测高度写进 --composer-h，供消息区避让。
+     ★ 一定要判"聊天视图是不是可见"：切到设置/记忆馆时 #viewChat 是 display:none，
+       此时 composerWrap 的高度量出来是 0 —— 原来会老老实实把 --composer-h 写成 0px，
+       于是下次回到聊天，消息区底部避让没了，最后一两句会被固定在底部的输入卡压住。
+       （ResizeObserver 也会因为视图隐藏触发一次，所以不是理论问题。） */
   function syncComposer() {
+    if (!composerWrap) return;
+    var chatView = $('#viewChat');
+    if (chatView && chatView.classList.contains('hidden')) return;   // 看不到就别量
     var h = Math.round(composerWrap.getBoundingClientRect().height);
+    if (h <= 0) return;                                            // 量到 0 一律当成"没量到"
     document.documentElement.style.setProperty('--composer-h', h + 'px');
   }
   if (window.ResizeObserver) new ResizeObserver(syncComposer).observe(composerWrap);
@@ -735,6 +779,10 @@
     if (errMsg) {
       el.classList.add('err');
       el.textContent = errMsg;
+      // 打上免除清扫的标记：error 气泡的文本是这里直接写的，
+      // 清扫判据只看"文字是否为空"，而它在某些时序下会被当成空行删掉
+      // —— 表现是"请求失败后屏幕上什么都不显示"（踩过）。
+      if (el.parentNode) el.parentNode.setAttribute('data-keep', '1');
       return;
     }
     renderMarkdown(el, el._raw || '');
@@ -751,9 +799,21 @@
     return m;
   }
   /** 把当前已定稿的若干气泡合并成一条 assistant 消息写回 */
+  /* 把这一轮的多个气泡合成一条记录。
+     ★ 关键是**气泡之间的分隔必须和气泡内部的换行区分开**：
+       · 气泡内部：压成单个 \n（= 渲染成 <br>，行内换行）
+       · 气泡之间：用 \n\n（= 渲染成两个 <p>，段间距）
+     之前两个都用单个 \n，于是"5 条气泡"刷新后被读回成一大段，
+     原本的气泡边界变成了普通换行 —— 用户看到的就是"刷新后空行被压缩了"。
+     反过来也要注意：气泡内部要是保留 \n\n，刷新后又会出现"一段里空一大行"，
+     所以气泡内部统一压平。 */
+  var BUBBLE_SEP = '\u241E';   // ␞ 气泡分隔符：一个正常对话里不会出现的控制图形字符
+
   function commitReply(msg, els) {
-    msg.content = els.map(function (el) { return el._raw || ''; })
-      .filter(Boolean).join('\n\n');
+    msg.content = els.map(function (el) {
+      // 气泡内部压平：段内不该留空行（留了刷新后就会"一段里空一大行"）
+      return String(el._raw || '').replace(/\n{2,}/g, '\n').trim();
+    }).filter(Boolean).join(BUBBLE_SEP);
     saveMsgs();
   }
 
@@ -798,6 +858,27 @@
       for (var j = 0; j < lines.length; j++) {
         if (j) p.appendChild(document.createElement('br'));
         appendInline(p, lines[j]);
+      }
+      el.appendChild(p);
+    }
+  }
+
+  /* 纯文本段落化：用户消息专用。
+     和 AI 消息走同一条段落规则（\n\n → <p>，\n → <br>），
+     但**不**解析 markdown 内联标记 —— 用户发什么就显示什么。
+     以前用户消息直接 textContent + pre-wrap，插入的空行会被渲染成
+     整行空白（约一个行高），和模型回复的紧凑段落间距对比非常突兀；
+     改成段落化之后两边视觉一致。 */
+  function appendPlainParas(el, text) {
+    var paras = String(text).split(/\n\n+/);
+    for (var i = 0; i < paras.length; i++) {
+      var para = paras[i];
+      if (!para.trim()) continue;
+      var p = document.createElement('p');
+      var lines = para.split('\n');
+      for (var j = 0; j < lines.length; j++) {
+        if (j) p.appendChild(document.createElement('br'));
+        p.appendChild(document.createTextNode(lines[j]));
       }
       el.appendChild(p);
     }
@@ -1065,15 +1146,16 @@
      故意拆成多条、彼此间留停顿 —— 真人的回复从来不是一坨，是一条一条来的。
      接入真实 API 后这层会被真流式替换，但「多条 + 停顿」的节奏要保留。 */
   var DEMO_REPLY = [
-    '你好，我是 **Ventana** —— 住在这台手机里的一个小房间。',
-    '现在还是演示模式：我正用内置回复跟你说话。'
-      + '流式打字、多条连发、中间那几段停顿，都已经在跑了。',
-    '想让我真的开口：\n'
-      + '1. 点右上角那枚齿轮\n'
-      + '2. 连接方式切成「真实 API」\n'
-      + '3. 填好接口地址、API Key 和模型名\n'
-      + '4. 点「试一试」确认能通，再点「保存」',
-    '然后我们就能真的聊起来。'
+    '你好，我是 **Ventana** 。\n'
+      + '它的意思是「窗户」，但我现在只是一扇假窗。\n'
+      + '演示模式下，我说的话都是预置的，不是真的在回复。',
+    '想让我真的开口？点击右上角齿轮，填上接口地址、API Key、模型名，测试连接，保存。然后我才算真正住进来。',
+    '如果你需要我有一个人设，读取并记住一些文本内容，则可以填写系统提示词，'
+      + '或者把纯文本文档导入资料库。\n'
+      + '系统提示词每一轮都会注入对话，而资料库的内容只会在有需要时进行检索，'
+      + '并读取目标内容附近的最多6000字文本。',
+    '希望我能带给你良好的使用体验！\n'
+      + '但在连接上我之前，你就当我在后台修容吧——上台前我总得先准备准备。'
   ];
 
   /* 演示节奏。测试可以把 window.__VENTANA_TEST_FAST 打开，把这些延迟压到最小 ——
@@ -1124,6 +1206,11 @@
       cur._msgIndex = currentAiMsg ? msgs().indexOf(currentAiMsg) : -1;
       replyEls.push(cur);
       currentAiEl = cur;
+      /* 图标排从第一帧就在（禁用态），不是等整轮说完才冒出来：
+         1) 那块高度本来就为图标预留了，空着就是白留；
+         2) 说完才出现会"跳"一下，长回复尤其明显；
+         3) 截图正好在流式中时，会看到"AI 回复下面一个图标都没有"，像功能坏了。 */
+      attachActions(cur, 'ai');
       scrollLog();
     }
     return cur;
@@ -1136,6 +1223,8 @@
     // 「正在输入」在输入卡上方单独显示，不占气泡 ——
     // 否则遇到"这一轮只调工具、没有正文"的情况，会先冒一个空气泡再消失。
     showTyping(true);
+    // 第一个气泡由 bubbleFor() 在真正有字时创建
+    bubbleFor();
   }
 
   function endReply() {
@@ -1143,13 +1232,64 @@
     replyEls.forEach(function (el) { if (!el._final) finalize(el); });
     if (currentAiMsg) commitReply(currentAiMsg, replyEls);
     // 流式结束才挂菜单：生成过程中挂上去，重新生成/删除按钮是能点但会出错的
+    /* 先把"一个字都没有"的气泡清掉（连带图标排）—— 它们可能来自被工具调用打断的那一段。
+       不清的话，DOM 里会留下几个空行：因为图标排当初给它预留了高度，
+       看起来就是"多出几段空白"。 */
+    /* ★ 判据不能只看 _raw：**错误提示**的文字是 finalize 直接写进节点的，
+       _raw 是空的 —— 按 _raw 过滤会把"请求失败"那条一起丢掉，屏幕上什么都不显示（踩过）。
+       所以定稿后的节点还要看它到底有没有文字。 */
+    var keep = replyEls.filter(function (el) {
+      return (el._raw || '').length || (el.textContent || '').trim().length;
+    });
+    replyEls.forEach(function (el) {
+      if (keep.indexOf(el) < 0) removeEmptyBubble(el);   // 只清"不在 keep 里"的那些
+    });
+    replyEls = keep.length ? keep : replyEls;
     var idx = currentAiMsg ? msgs().indexOf(currentAiMsg) : -1;
-    attachActionsToReply(replyEls, idx);
+    var iconHost = attachActionsToReply(replyEls, idx);
+    enableActions(iconHost);   // 说完了，按钮才可点（放开的是**挂图标那条**）
     replyEls = [];
     cur = null;
     currentAiEl = null;
     currentAiMsg = null;
     setBusy(false);
+    sweepEmptyRows();   // 所有定稿都做完了，最后按 DOM 事实扫一遍
+  }
+
+  /* 按 DOM 事实清掉"没有文字的空气泡"。
+     为什么要这一层：replyEls 可能已经和文档对不上（工具调用会把气泡换了又换），
+     留下的空气泡因为图标排预留了高度，看起来就是"多出来一段空白"。
+     注意只处理**消息行**（.row.me / .row 里有 .reply 或 .bubble 的），
+     别误删时间戳行（.tstamp）—— 它没有 .body，会被误判成"空"。 */
+  /* 清掉**已经定稿、且一个字都没有**的气泡行（连同它的图标排）。
+     什么时候会有这种行：一轮回答被工具调用切成几段时，会有段是空的。
+     判据一定要窄，宁可漏删也不能误删 —— 这里踩过两次：
+       · 系统事件行（.row.sys）的文本是随后挂上去的，扫早了整条不见
+       · 出错提示、正在流式中的气泡，某一瞬间也是"没有文字"的状态，
+         删掉就再也回不来了（表现：请求失败后屏幕上什么都不显示）
+     所以只删同时满足三个条件的行：不是系统行、不是 .err、且 body 已 _final。 */
+  function sweepEmptyRows() {
+    if (busy) return 0;              // 有在途请求时不动手
+    var doomed = [];
+    logEl.querySelectorAll('.row').forEach(function (row) {
+      if (row.classList.contains('sys')) return;
+      var body = row.querySelector('.body');
+      if (!body) return;                                   // 没有 body 的行不再自删（见 addMsg 说明）
+      if (!body._final) return;                            // 还在流式中
+      if (body.classList.contains('err')) return;          // 出错提示
+      if ((body.textContent || '').trim().length) return;
+      doomed.push(row);
+    });
+    doomed.forEach(function (row) {
+      var col = row.firstElementChild;
+      if (col) {
+        var acts = col.querySelector(':scope > .acts');
+        if (acts) acts.remove();
+        col.classList.remove('has-acts');
+      }
+      row.remove();
+    });
+    return doomed.length;
   }
 
   function send() {
@@ -1162,6 +1302,7 @@
     var meMsg = pushMsg({ role: 'user', content: text });
     meEl._msgIndex = msgs().indexOf(meMsg);
     attachActions(meEl, 'me');
+    enableActions(meEl);
     scrollLog();
 
     box.value = '';
@@ -1267,6 +1408,11 @@
             if (!el._raw) removeEmptyBubble(el);
             return runApi();
           }
+          /* ★ 这里要注意：上面那句 removeEmptyBubble(el) 会把 el 从 DOM 里摘掉。
+             所以每次写错误提示之前都得重新取一个**还在文档里**的气泡 ——
+             否则 finalize 是往一个已脱离文档的节点里写字，屏幕上什么都不出现
+             （表现："请求失败后没有任何提示"，踩过）。 */
+          if (!el.isConnected) el = bubbleFor();
           finalize(el, '没接上：' + msg);
           endReply();
         });
@@ -1275,26 +1421,22 @@
 
   /* 输入卡上方那条"正在输入"：只在**还没吐出第一个字**时显示。
      比空气泡干净，也不会因为"这一轮只调工具"就闪一个空气泡出来 */
-  var typingEl = null;
+  /* 「正在输入」那条指示器。
+     ★ 千万别把元素缓存到闭包变量里：第一次调用时才创建它，
+       缓存的引用之后再读还是 null，「正在输入」就只工作一次（踩过）。 */
   function showTyping(on) {
-    // 注意顺序：必须先 ensureTypingRow() 再判断 typingEl。
-    // 写成"先 if (!typingEl) return"的话，元素还没建时会把整个显示逻辑吞掉，
-    // 表现是"正在输入"永远不出现（本轮踩过：元素在 HTML 里本来就不存在）。
-    ensureTypingRow();
-    if (!typingEl) return;
-    typingEl.classList.toggle('show', !!on);
+    var el = document.getElementById('typing');
+    if (!el) {
+      var wrap = document.getElementById('composerWrap');
+      el = document.createElement('div');
+      el.id = 'typing';
+      el.className = 'typingbar';
+      el.innerHTML = '<i></i><i></i><i></i>';
+      if (wrap && wrap.parentNode) wrap.parentNode.insertBefore(el, wrap);
+      else document.body.appendChild(el);
+    }
+    el.classList.toggle('show', !!on);
   }
-  function ensureTypingRow() {
-    if (typingEl && typingEl.parentNode) return;
-    typingEl = document.createElement('div');
-    typingEl.id = 'typing';
-    typingEl.className = 'typingbar';
-    typingEl.innerHTML = '<i></i><i></i><i></i>';
-    var wrap = document.getElementById('composerWrap');
-    if (wrap && wrap.parentNode) wrap.parentNode.insertBefore(typingEl, wrap);
-    else document.body.appendChild(typingEl);
-  }
-
   /* 一轮回答的图标挂在哪：**最后一个有内容的气泡下面**。
      一轮回答可能是多条气泡（演示模式会连发、工具调用会打断正文），
      挂在第一条下面的话，图标会被夹在两段话中间（作者报过这个 bug）。
@@ -1307,6 +1449,7 @@
     });
     if (!target && els.length) target = els[els.length - 1];
     if (target) attachActions(target, 'ai');
+    return target;   // 图标挂在哪条气泡上 —— 调用方要拿它去 enableActions
   }
 
   /** 撤掉一个字都没有的气泡（工具调用前后会留下这种空壳） */
@@ -1314,7 +1457,15 @@
     if (!el) return;
     if ((el._raw || '').length) return;
     var row = el.parentNode;
-    if (row) row.remove();
+    if (row) {
+      // 图标排是挂在 .col 上的（和图标的宿主同层），删气泡时要一起收掉 ——
+      // 不然会留下一个"有图标但没有文字"的空行
+      var col = el.parentNode;
+      var acts = col && col.querySelector(':scope > .acts');
+      if (acts) acts.remove();
+      if (col) col.classList.remove('has-acts');
+      row.remove();
+    }
     replyEls = replyEls.filter(function (x) { return x !== el; });
     if (cur === el) cur = null;
     if (currentAiEl === el) currentAiEl = null;
@@ -1343,7 +1494,8 @@
        先算索引再删节点的话，删掉的那个空壳还占着位置（视图里会剩一个空气泡）。 */
     if (currentAiMsg) {
       var fixedIdx = msgs().indexOf(currentAiMsg);
-      attachActionsToReply(replyEls, fixedIdx);
+      var stopHost = attachActionsToReply(replyEls, fixedIdx);
+      enableActions(stopHost);
     }
     if (currentAiMsg) {
       var noteIdx = msgs().indexOf(currentAiMsg);
@@ -1382,11 +1534,17 @@
   }
 
   box.addEventListener('input', function () { autoGrow(); refreshSend(); });
+  /* 触屏（手机/平板）：软键盘回车 = 换行，发送交给按钮，避免"想换行却把消息发出去"；
+     桌面键盘：Enter 发送、Shift+Enter 换行。isComposing 防输入法候选中误触发。
+     触屏判定只用 maxTouchPoints：Chrome 桌面 'ontouchstart' in window 恒为 true，
+     用它会把台式机键盘也当成触屏，回车就发不出消息了（踩过）。 */
+  function isTouchUI() {
+    return (navigator.maxTouchPoints || 0) > 0;
+  }
   box.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-      e.preventDefault();
-      send();
-    }
+    if (e.key !== 'Enter' || e.isComposing) return;
+    if (isTouchUI()) return;                       // 触屏：默认插入换行，不拦截
+    if (!e.shiftKey) { e.preventDefault(); send(); }
   });
   sendBtn.addEventListener('click', send);
 
@@ -1407,7 +1565,13 @@
     $('#viewMemory').classList.toggle('hidden', which !== 'memory');
   }
 
-  function openConfig() { fillCfgForm(); showView('config'); }
+  function openConfig() {
+    fillCfgForm();
+    showView('config');
+    // 回到顶部：不然会继承上一次读到一半的滚动位置，看起来像"没打开"
+    var cfg = document.querySelector('.cfg');
+    if (cfg) cfg.scrollTop = 0;
+  }
   function openMemory() { clearMemoryNew(); renderMemory(); renderArchives(); showView('memory'); }
   $('#openMemory').addEventListener('click', openMemory);
   $('#memBack').addEventListener('click', function () { showView('chat'); scrollLog(); });
@@ -1526,6 +1690,9 @@
   fPrompt.addEventListener('focus', function () {
     schedulePromptScroll(350);       // 等键盘弹出动画走完再算，否则高度还没缩到位
   });
+  /* 失焦（键盘收起）时也补一次：键盘弹出那段时间 --composer-h 可能被写成过小值，
+     而聊天视图当时是隐藏的、syncComposer 被我们主动跳过 —— 回聊天前补上。 */
+  fPrompt.addEventListener('blur', function () { setTimeout(syncComposer, 120); });
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', function () {
       schedulePromptScroll(80);      // 键盘弹起/收起都会触发这个
@@ -2103,7 +2270,40 @@
     toast('已删除这份资料');
   });
 
+  /* ---------- 顶部安全区：实测，别只信 env() ----------
+     作者在 OPPO 内置浏览器上撞到过：顶栏上方多出一大块空白（截图实测
+     状态栏底到顶栏内容有 107 CSS px，而同机同页面的夜间模式只有 19px）。
+     根因是**重复计算**：浏览器自己已经把页面排在状态栏下方了，
+     而 CSS 里的 env(safe-area-inset-top) 又加了一份 padding。
+
+     怎么判断"浏览器是否已经让开"：页面顶端如果已经被推到状态栏下方，
+     visualViewport.offsetTop 就会 > 0。这时 CSS 那份 inset 就是多余的，
+     置 0；否则才用 env() 给的值（真正的沉浸式全屏浏览器）。
+
+     CSS 那边仍然有 min(env(...), 30px) 作为兜底，这里是覆盖它。 */
+  function applySafeArea() {
+    var vv = window.visualViewport;
+    var off = vv ? Math.round(vv.offsetTop || 0) : 0;
+    var root = document.documentElement;
+    if (off > 4) {
+      // 浏览器已经让开了状态栏 → 不要再自己加一份
+      root.style.setProperty('--sat', '0px');
+      root.setAttribute('data-safe-top', 'reserved');
+    } else {
+      // 沉浸式（内容顶到屏幕最上沿）→ 用 env()，交给 CSS 兜底
+      root.style.removeProperty('--sat');
+      root.setAttribute('data-safe-top', 'immersive');
+    }
+    return off;
+  }
+
   /* ---------- 启动 ---------- */
+  applySafeArea();
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', applySafeArea);
+    window.visualViewport.addEventListener('scroll', applySafeArea);
+  }
+
   loadStore();          // 会话（必须在消息区任何操作之前）
   loadDocs();
   loadMemories();
@@ -2124,12 +2324,15 @@
   if (window.visualViewport) {
     var lastVV = window.visualViewport.height;
     window.visualViewport.addEventListener('resize', function () {
+      /* 这两件事都是"聊天视图里才成立"的：滚到底、量输入卡。
+         在设置页/记忆馆里做毫无意义，而且会去量一个 display:none 的输入卡。 */
+      var chatOpen = !$('#viewChat').classList.contains('hidden');
       var h = window.visualViewport.height;
-      if (lastVV - h > 60 && atBottom() && window.visualViewport.offsetTop > 0) {
+      if (chatOpen && lastVV - h > 60 && atBottom() && window.visualViewport.offsetTop > 0) {
         setTimeout(function () { scrollLog(); syncComposer(); }, 60);
       }
       lastVV = h;
-      syncComposer();
+      if (chatOpen) syncComposer();
     });
   }
 
@@ -2142,20 +2345,42 @@
   if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
     var hadController = !!navigator.serviceWorker.controller;
     var reloading = false;
-    var reloadOnce = function () {
+
+    /* ★ 自动刷新必须**避开用户正在操作的那几秒**。
+       原来只要 controllerchange 到就立刻 location.reload()，
+       而 SW 换版本后的接管通常发生在打开页面后 0.5~3 秒内 ——
+       如果用户正好在这时点了顶栏的模型名（设置页刚打开），
+       页面会在他眼前被刷掉、回到对话区，看起来就是
+       「点一下进去了又被弹回来，再点一次才停得住」。
+       所以：5 秒内有过交互就先不刷，等用户静置 5 秒再刷。
+       也不无限期拖 —— 顶多多等几秒，总好过把用户正在做的事刷没。 */
+    var lastAct = Date.now();
+    var acted = false;
+    ['pointerdown', 'touchstart', 'keydown'].forEach(function (n) {
+      document.addEventListener(n, function () { acted = true; lastAct = Date.now(); }, { passive: true });
+    });
+    function reloadOnce(why) {
       if (reloading) return;      // 每次加载只刷一次，避免意外循环
+      var quietFor = Date.now() - lastAct;
+      if (acted && quietFor < 5000) {
+        setTimeout(function () { reloadOnce(why); }, 5000 - quietFor + 100);
+        return;
+      }
       reloading = true;
       location.reload();
-    };
+    }
+
     navigator.serviceWorker.addEventListener('controllerchange', function () {
       // 新版本接管时自动刷一次，免得手机上一直看着旧代码
-      if (hadController) reloadOnce();
+      if (hadController) reloadOnce('controllerchange');
     });
     navigator.serviceWorker.addEventListener('message', function (ev) {
       // Service Worker 说「这一页是从缓存里拿的旧版本」（换版本后旧 SW 还在服务，
       // 或者断网）。在线的话刷一次就能拿到新的。
       var d = ev.data || {};
-      if (d.type === 'stale-page' && navigator.serviceWorker.controller && navigator.onLine) reloadOnce();
+      if (d.type === 'stale-page' && navigator.serviceWorker.controller && navigator.onLine) {
+        reloadOnce('stale-page');
+      }
     });
     navigator.serviceWorker.register('sw.js?v=' + encodeURIComponent(VERSION))
       .catch(function () {});

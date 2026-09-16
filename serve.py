@@ -16,13 +16,52 @@ import argparse
 import functools
 import http.server
 import os
+import re
 import socket
 import socketserver
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def app_version():
+    """从 app.js 里读 VERSION，用来给 styles.css / app.js 的引用打上版本号。
+
+    为什么要这样做：这两个文件改了必须立刻生效（否则手机上一直看旧样式/
+    旧脚本）。SW 侧已经改成网络优先，这里是第二道保险 —— 即使有中间层
+    按 URL 缓存，query 变了也会重新取。
+    版本号只在 app.js 里维护一处，避免手工同步漏掉。
+    """
+    try:
+        with open(os.path.join(APP_DIR, 'app.js'), encoding='utf-8') as f:
+            head = f.read(2000)
+        m = re.search(r"VERSION\s*=\s*'([^']+)'", head)
+        return m.group(1) if m else '0'
+    except OSError:
+        return '0'
+
+
+_VERSION = app_version()
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
+    def send_head(self):
+        # index.html 里写的是 styles.css?v=__V__，这里把占位符换成真实版本号
+        path = self.translate_path(self.path)
+        if os.path.basename(path) == 'index.html' or self.path in ('/', '/index.html'):
+            try:
+                with open(path, 'rb') as f:
+                    body = f.read().replace(b'__V__', _VERSION.encode())
+            except OSError:
+                return super().send_head()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store, must-revalidate')
+            self.end_headers()
+            import io
+            return io.BytesIO(body)
+        return super().send_head()
+
     def end_headers(self):
         self.send_header('Cache-Control', 'no-store, must-revalidate')
         self.send_header('Pragma', 'no-cache')
