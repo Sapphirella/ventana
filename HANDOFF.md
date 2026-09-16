@@ -689,6 +689,66 @@ if (sync.prompt || sync.docs) clearSync();  // ← 标记照样被清掉
 
 ---
 
+## 16. 公开仓库与 GitHub Pages（2026-09-16 建立）
+
+- **仓库**：`Sapphirella/ventana`（public）
+- **线上**：https://sapphirella.github.io/ventana/
+- **Pages 配置**：`main` 分支的 `/` 根目录（legacy 构建）
+- 仓库描述：`Ventana —— AI 虚拟角色聊天 App（PWA，手机端优先）`
+
+### 仓库里放什么
+
+**只放 `ventana/` 里的内容，且放在仓库根目录**（所以 `index.html` 在 `/ventana` 仓库的根上）。
+本地工作区的仓库根**不是** Ventana —— 除 `ventana/` 外还有若干**私人素材目录**，
+一律不发布。发布前请务必确认：
+
+```bash
+# 检查待发布文件里有没有私人素材痕迹（应全部为 0）
+for kw in <私人关键词...>; do grep -rl "$kw" ventana/*.md ventana/*.py ventana/*.js; done
+```
+
+已知会被排除的：`ventana/.dumate/`（本地调试截图，**里面有聊天内容，绝对不能发**）、
+`.DS_Store`。
+
+### 怎么推（⚠️ 这条网络下 git 协议不通）
+
+**本机所在校园网封了 `github.com:443`** —— `git push` / `git ls-remote` 会直接超时。
+但 `api.github.com` 和 `codeload.github.com` 是通的，所以用 **Git Data API** 提交：
+
+```bash
+# 脚本在 ventana/.dumate/ghpush.py（不进公开仓库）
+GH_TOKEN=xxx python3 ventana/.dumate/ghpush.py --dry-run   # 先看差什么
+GH_TOKEN=xxx python3 ventana/.dumate/ghpush.py             # 真提交
+```
+
+它做的事：读远端 HEAD → 用 blob SHA 逐文件比对（内容相同就不重传）→
+建 tree（**不传 base_tree，即"结果恰好是这些文件"**）→ 建 commit → 更新 ref。
+所以**不会误删远端文件**，也能明确报出"远端多出来的文件"。
+
+> 如果哪天换到能连 github.com 的网络，`git remote add origin ... && git push` 更省事。
+> 但注意：**远端是独立的一份历史**（用 API 提交时没有本地增量历史），
+> 和本地工作区的 git 不是同一条线 —— 别指望两边提交能对上。
+
+### 版本号在静态托管下怎么生效
+
+`index.html` 里写的是 `styles.css?v=__V__`（占位符），有两层替换：
+
+1. **本地/开发**：`serve.py` 读 `app.js` 的 `VERSION` 替换掉；
+2. **静态托管（Pages）**：`serve.py` 不参与，由 **`sw.js` 在返回 index.html 时替换**
+   （`withVersion()`）。所以在 Pages 上也能拿到 `?v=v0.26` 而不是字面量 `__V__`。
+
+另外仓库根放了 **`.nojekyll`** —— 不让 GitHub Pages 用 Jekyll 处理（否则
+下划线开头的目录 `_vendor/` 会被忽略）。
+
+### Pages 上线后要检查什么
+
+- `isSecureContext === true`（HTTPS）→ **Service Worker 才会注册**，
+  这也是"手机上改完看不到新样式"的根治点（HTTP 局域网访问时 SW 根本不存在）
+- 顶栏高度 ≈ 61 CSS px、`--sat` 有上限、`.row .col` 的 flex 不是 grow
+- 引用里是 `?v=<真实版本>` 而不是 `?v=__V__`
+
+---
+
 以下几件事接手时**不要自己拍板**，先问：
 
 1. **配色方向** —— 现在刻意是黑白，作者说过"后期再慢慢配置 css"。
