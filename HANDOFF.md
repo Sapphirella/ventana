@@ -707,8 +707,8 @@ if (sync.prompt || sync.docs) clearSync();  // ← 标记照样被清掉
 for kw in <私人关键词...>; do grep -rl "$kw" ventana/*.md ventana/*.py ventana/*.js; done
 ```
 
-已知会被排除的：`ventana/.dumate/`（本地调试截图，**里面有聊天内容，绝对不能发**）、
-`.DS_Store`。
+已知会被排除的：**本地调试目录**（截图等，里面有聊天内容，绝对不能发）、`.DS_Store`。
+同步脚本本身也放在那个目录里，所以它也不会被发布。
 
 ### 怎么推（⚠️ 这条网络下 git 协议不通）
 
@@ -716,9 +716,9 @@ for kw in <私人关键词...>; do grep -rl "$kw" ventana/*.md ventana/*.py vent
 但 `api.github.com` 和 `codeload.github.com` 是通的，所以用 **Git Data API** 提交：
 
 ```bash
-# 脚本在 ventana/.dumate/ghpush.py（不进公开仓库）
-GH_TOKEN=xxx python3 ventana/.dumate/ghpush.py --dry-run   # 先看差什么
-GH_TOKEN=xxx python3 ventana/.dumate/ghpush.py             # 真提交
+# 同步脚本放在本地调试目录里（不进公开仓库）
+GH_TOKEN=xxx python3 <本地同步脚本> --dry-run   # 先看差什么
+GH_TOKEN=xxx python3 <本地同步脚本>             # 真提交
 ```
 
 它做的事：读远端 HEAD → 用 blob SHA 逐文件比对（内容相同就不重传）→
